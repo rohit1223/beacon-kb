@@ -106,7 +106,11 @@ def resolve_citations(
                 f"grounded in the retrieved evidence - rejecting the response."
             )
         chunk = ev.hit.chunk
-        excerpt = chunk.text[:200].strip()
+        excerpt = (
+            ev.snippet.text[:200].strip()
+            if ev.snippet is not None and ev.snippet.text
+            else chunk.text[:200].strip()
+        )
         citations.append(
             Citation(
                 label=label,

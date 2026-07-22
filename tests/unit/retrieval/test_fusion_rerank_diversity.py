@@ -605,6 +605,51 @@ class TestMMRDiversify:
         # All hits preserved
         assert len(result) == 4
 
+    def test_lambda_1_short_circuit_preserves_rerank_order(self) -> None:
+        """lambda_mmr=1.0 must preserve input order even when it inverts fusion order.
+
+        Regression (I1): MMR previously used fusion_score as the relevance proxy,
+        so at lambda_mmr=1.0 it re-sorted by fusion_score and undid the reranker's
+        deliberate ordering.
+        """
+        # Reranker put 'b' first despite lower fusion_score than 'a'.
+        hit_b = dataclasses.replace(
+            self._hit("content b", chunk_id="ord-b"),
+            fusion_score=0.3,
+            rerank_score=0.9,
+        )
+        hit_a = dataclasses.replace(
+            self._hit("content a", chunk_id="ord-a"),
+            fusion_score=0.8,
+            rerank_score=0.2,
+        )
+        result = mmr_diversify([hit_b, hit_a], lambda_mmr=1.0)
+        assert [h.chunk.id for h in result] == [hit_b.chunk.id, hit_a.chunk.id], (
+            "lambda_mmr=1.0 must preserve the (rerank-ordered) input order, "
+            "not re-sort by fusion_score."
+        )
+
+    def test_rerank_score_used_as_relevance_proxy(self) -> None:
+        """When rerank_score is set, MMR must use it as relevance, not fusion_score.
+
+        'b' has low fusion but high rerank; at near-pure relevance it must be
+        selected first when the proxy is rerank_score.
+        """
+        hit_a = dataclasses.replace(
+            self._hit("alpha topic text", chunk_id="prox-a"),
+            fusion_score=0.9,
+            rerank_score=0.1,
+        )
+        hit_b = dataclasses.replace(
+            self._hit("beta subject words", chunk_id="prox-b"),
+            fusion_score=0.2,
+            rerank_score=0.9,
+        )
+        result = mmr_diversify([hit_a, hit_b], lambda_mmr=0.9)
+        assert result[0].chunk.id == hit_b.chunk.id, (
+            "MMR relevance proxy must prioritise rerank_score over fusion_score."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Registry discovery tests
@@ -649,3 +694,57 @@ class TestRegistryDiscovery:
         # With no reranker installed, resolving any name must raise PluginNotFound
         with pytest.raises(PluginNotFound):
             registry.resolve(groups.RERANKERS, "nonexistent_reranker")
+
+
+# ---------------------------------------------------------------------------
+# RRFusion registry precedence (I4)
+# ---------------------------------------------------------------------------
+
+
+class TestRRFusionRegistryPrecedence:
+    """RRFusion must be a builtin (lowest precedence) so 'rrf' can be overridden."""
+
+    def setup_method(self) -> None:
+        from beacon_kb.registry import discovery, precedence
+        from beacon_kb.registry.builtins import _register_builtins
+
+        precedence.clear_registry()
+        discovery.reset_scan_state()
+        _register_builtins()
+
+    def teardown_method(self) -> None:
+        from beacon_kb.registry import discovery, precedence
+        from beacon_kb.registry.builtins import _register_builtins
+
+        precedence.clear_registry()
+        discovery.reset_scan_state()
+        _register_builtins()
+
+    def test_rrf_appears_in_list_plugins(self) -> None:
+        """list_plugins() must include builtin names so operators can see them."""
+        from beacon_kb import registry
+        from beacon_kb.registry import groups
+
+        names = registry.list_plugins(groups.FUSION)
+        assert "rrf" in names, f"list_plugins(FUSION) must include builtin 'rrf'. Got: {names}"
+
+    def test_rrf_describe_has_builtin_flag(self) -> None:
+        """describe() for rrf must report builtin=True."""
+        from beacon_kb.registry import groups, precedence
+
+        info = precedence.describe(groups.FUSION, "rrf")
+        assert info.get("builtin") is True, (
+            f"describe(FUSION, 'rrf') must have builtin=True. Got: {info}"
+        )
+
+    def test_explicit_rrf_overrides_builtin(self) -> None:
+        """An explicitly registered 'rrf' instance must win over the builtin."""
+        from beacon_kb import registry
+        from beacon_kb.registry import groups
+
+        custom_rrf = RRFusion(k=10)  # non-default k distinguishes it
+        registry.register(group=groups.FUSION, name="rrf", instance=custom_rrf)
+        resolved = registry.resolve(groups.FUSION, "rrf")
+        assert resolved is custom_rrf, "Explicitly registered 'rrf' must override the builtin."
+        info = registry.describe(groups.FUSION, "rrf")
+        assert info.get("builtin") is False

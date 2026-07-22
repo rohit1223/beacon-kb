@@ -73,11 +73,12 @@ def _register_builtins() -> None:
     #   registry.resolve(groups.RETRIEVERS, "dense", protocol=DenseRetriever)
 
     # FUSION: RRFusion is the built-in rank-based fusion strategy.
-    # Registered via register() (the explicit path) so list_plugins() returns it.
+    # Registered via register_builtin() so third-party 'rrf' entry-point plugins
+    # can override it via the explicit registration path (higher precedence).
     # RRFusion is stateless and safe to register as a default.
     from beacon_kb.retrieval.fusion import RRFusion
 
-    precedence.register(
+    precedence.register_builtin(
         group=groups.FUSION,
         name="rrf",
         instance=RRFusion(),

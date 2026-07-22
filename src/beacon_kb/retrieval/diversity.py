@@ -111,11 +111,18 @@ def mmr_diversify(hits: list[Hit], *, lambda_mmr: float = 0.5) -> list[Hit]:
         lambda_mmr * relevance(h) - (1 - lambda_mmr) * max_sim(h, selected)
 
     where:
-        relevance(h) = h.fusion_score if set, else 1 / (1 + original_rank)
+        relevance(h) = h.rerank_score if set, else h.fusion_score if set,
+                       else 1 / (1 + original_rank)
         max_sim(h, selected) = max Jaccard similarity to any already-selected hit.
 
-    lambda_mmr=1.0: pure relevance ordering (original order preserved).
-    lambda_mmr=0.0: maximum diversity (similarity to selected hits penalised fully).
+    Relevance proxy priority: rerank_score > fusion_score > 1/(1+rank).
+    This preserves the reranker's deliberate ordering signal when available.
+
+    lambda_mmr=1.0: pure relevance ordering - short-circuits to list(hits)
+                    to preserve the input order exactly (which is already
+                    rerank-ordered).  Re-sorting by any proxy would undo
+                    the reranker's deliberate ordering.
+    lambda_mmr=0.0: maximum diversity (similarity penalised fully).
 
     No hits are dropped; all are re-ordered.
 
@@ -132,10 +139,18 @@ def mmr_diversify(hits: list[Hit], *, lambda_mmr: float = 0.5) -> list[Hit]:
     if len(hits) == 1:
         return list(hits)
 
-    # Assign relevance scores.
+    # Short-circuit: lambda_mmr=1.0 means pure relevance = preserve input order.
+    # The input list is already in the correct order (reranked or fused);
+    # re-sorting by any proxy would undo the reranker's deliberate ordering.
+    if lambda_mmr == 1.0:
+        return list(hits)
+
+    # Assign relevance scores.  Priority: rerank_score > fusion_score > 1/(1+rank).
     relevance: list[float] = []
     for rank, hit in enumerate(hits):
-        if hit.fusion_score is not None:
+        if hit.rerank_score is not None:
+            relevance.append(hit.rerank_score)
+        elif hit.fusion_score is not None:
             relevance.append(hit.fusion_score)
         else:
             relevance.append(1.0 / (1.0 + rank))

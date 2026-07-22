@@ -53,7 +53,7 @@ class TestDefaultConstruction:
         cfg = AnswerConfig()
         assert cfg.max_input_tokens == 4096
         assert cfg.max_output_tokens == 512
-        assert cfg.abstain_threshold == 0.5
+        assert cfg.abstain_threshold == 0.0
         assert cfg.temperature == 0.0
 
     def test_agentic_config_defaults(self) -> None:

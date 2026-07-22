@@ -38,10 +38,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from beacon_kb.config import AnswerConfig
+from beacon_kb.errors import CitationError
 from beacon_kb.generation.abstention import is_post_abstain, should_pre_abstain
 from beacon_kb.generation.citations import resolve_citations
 from beacon_kb.generation.prompts import PROMPT_VERSION
-from beacon_kb.models import AnswerResponse, Hit, Query, QueryId
+from beacon_kb.models import AnswerResponse, Evidence, Hit, Query, QueryId
 from beacon_kb.protocols import Generator, ProgressObserver
 from beacon_kb.retrieval.query import QueryVariants
 
@@ -102,6 +103,7 @@ def run_answer(
     generator: Generator,
     hits: list[Hit],
     *,
+    evidence: list[Evidence] | None = None,
     config: AnswerConfig | None = None,
     observer: ProgressObserver | None = None,
     query_variants: QueryVariants | None = None,
@@ -116,6 +118,13 @@ def run_answer(
         query:     Original user query.
         generator: Injected Generator (must conform to protocols.Generator).
         hits:      Evidence hits from RetrievalPipeline.search() (zero LLM calls).
+        evidence:  Canonical Evidence list from RetrievalPipeline.search().
+                   When supplied, the generator's returned evidence is validated
+                   against it: any chunk ID in the generator's output that is
+                   not present in the canonical retrieved evidence raises
+                   CitationError.  This closes the loophole where a hostile or
+                   buggy generator could fabricate its own evidence tuple and
+                   have citations validated only against that fabrication.
         config:    AnswerConfig driving abstain_threshold and token budgets.
                    Defaults to AnswerConfig() if not provided.
         observer:  Optional ProgressObserver for structured events.
@@ -132,7 +141,8 @@ def run_answer(
         even for abstained responses.
 
     Raises:
-        CitationError: If citation validation fails (unknown label in answer_text).
+        CitationError: If citation validation fails (unknown label in answer_text,
+                       or generator evidence not grounded in canonical retrieval).
         BackendError:  If the generator raises a backend failure.
     """
     if config is None:
@@ -195,7 +205,21 @@ def run_answer(
     elapsed_gen = time.monotonic() - t_gen_start
 
     # Stage 4: Post-generation abstention.
+    # I2 fix: apply the same generator-chunk-ID subset check here as in Stage 5,
+    # so a fabricated-evidence abstaining generator is also rejected.
     if is_post_abstain(raw.answer_text) or raw.abstained:
+        if evidence is not None:
+            canonical_chunk_ids = {str(ev.hit.chunk.id) for ev in evidence}
+            for gen_ev in raw.evidence:
+                gen_chunk_id = str(gen_ev.hit.chunk.id)
+                if gen_chunk_id not in canonical_chunk_ids:
+                    raise CitationError(
+                        f"Generator returned abstention response with "
+                        f"fabricated evidence chunk ID {gen_chunk_id!r} "
+                        f"that is not in the canonical retrieved evidence. "
+                        f"Rejecting to prevent ungrounded evidence from "
+                        f"escaping validation on the abstention path."
+                    )
         response = AnswerResponse(
             query_id=query.id,
             answer_text="",
@@ -229,6 +253,22 @@ def run_answer(
         return response, diag
 
     # Stage 5: Citation validation - structural, cannot be bypassed.
+    # When canonical retrieval evidence is supplied, first verify the
+    # generator's evidence is grounded in it: every chunk ID the generator
+    # returned must have been retrieved.  A fabricated chunk is rejected
+    # before any label resolution, so a hostile generator cannot smuggle
+    # invented evidence past validation by citing its own fabrication.
+    if evidence is not None:
+        canonical_chunk_ids = {str(ev.hit.chunk.id) for ev in evidence}
+        for gen_ev in raw.evidence:
+            gen_chunk_id = str(gen_ev.hit.chunk.id)
+            if gen_chunk_id not in canonical_chunk_ids:
+                raise CitationError(
+                    f"Generator returned evidence with chunk ID {gen_chunk_id!r} "
+                    f"that is not in the canonical retrieved evidence for this "
+                    f"query.  Rejecting to prevent ungrounded citations from "
+                    f"escaping validation."
+                )
     citations = resolve_citations(raw.answer_text, raw.evidence)
 
     # Assemble the final response preserving cited evidence.

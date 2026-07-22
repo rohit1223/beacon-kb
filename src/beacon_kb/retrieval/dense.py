@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from beacon_kb.errors import BackendError
-from beacon_kb.models import Hit, Query
+from beacon_kb.models import DEFAULT_TOP_K, Hit, Query
 from beacon_kb.retrieval.filters import FilterSpec, apply_filters
 from beacon_kb.storage.vector_math import validate_similarity
 
@@ -112,10 +112,12 @@ class EmbedderDenseRetriever:
 
         # Retrieve dense candidates from the store with typed error propagation.
         # Dimension incompatibility raises BackendError from the store.
+        # query.top_k is int | None; dense_retrieve() requires int; fall back to DEFAULT_TOP_K.
+        effective_top_k: int = query.top_k if query.top_k is not None else DEFAULT_TOP_K
         hits: list[Hit] = self._store.dense_retrieve(
             query_vector=query_vector,
             corpus_id=query.corpus_id,
-            top_k=query.top_k,
+            top_k=effective_top_k,
             similarity=self._similarity,
         )
 

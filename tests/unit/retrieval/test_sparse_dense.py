@@ -362,8 +362,8 @@ class TestBM25SparseRetriever:
         retriever = BM25SparseRetriever(store=store)
         q = Query(id=QueryId("q1"), text="error code")
         hits = retriever.retrieve(q)
-        if hits:
-            assert all(h.sparse_score is not None for h in hits)
+        assert hits, "Expected hits for query 'error code' in chunk containing 'error code'"
+        assert all(h.sparse_score is not None for h in hits)
 
     def test_only_sparse_score_set(self) -> None:
         chunks = [_make_chunk("hello world")]
@@ -415,6 +415,69 @@ class TestBM25SparseRetriever:
         hits = retriever.retrieve(q)
         assert len(hits) <= 3
 
+    def test_natural_language_question_returns_hits(self) -> None:
+        """Natural-language questions must match despite leading stopwords.
+
+        Regression: the old _build_fts5_query required ALL tokens including
+        function words like 'how', 'do', 'I', 'the' in an AND expression, so
+        'how do I install the parser' returned 0 hits against realistic doc text
+        that does not contain those question-phrasing words.
+        The corpus chunk uses realistic documentation prose - it does NOT echo
+        the stopwords from the query.
+        """
+        chunks = [
+            _make_chunk("Run pip install beacon-kb to set up the parser.")
+        ]
+        store = self._store_with_chunks(chunks)
+        retriever = BM25SparseRetriever(store=store)
+        q = Query(id=QueryId("q1"), text="how do I install the parser")
+        hits = retriever.retrieve(q)
+        assert len(hits) > 0, (
+            "Natural-language question must find relevant chunks even when the "
+            "corpus text does not contain the query stopwords (how/do/I/the). "
+            "If this fails, stopword filtering or the OR-fallback is broken."
+        )
+
+    def test_word_order_shuffled_returns_hits(self) -> None:
+        """Shuffled word order must not reduce recall to zero."""
+        chunks = [
+            _make_chunk("the configuration path for the beacon config file is .beacon/config.toml")
+        ]
+        store = self._store_with_chunks(chunks)
+        retriever = BM25SparseRetriever(store=store)
+        # Word order differs from the chunk text.
+        q = Query(id=QueryId("q2"), text="config path beacon configuration")
+        hits = retriever.retrieve(q)
+        assert len(hits) > 0, "Shuffled-word-order query must still find relevant chunks."
+
+    def test_question_form_returns_hits(self) -> None:
+        """Question-form queries must find relevant document chunks.
+
+        The corpus chunk uses realistic documentation prose without the
+        question phrasing (no 'what', 'does') so stopword filtering must
+        let the content words (errors, retrieval, pipeline, raise) do the work.
+        Also validates the 'What is the capital of France?' pattern with
+        realistic doc text that states the fact rather than asking the question.
+        """
+        chunks = [
+            _make_chunk("The retrieval pipeline raises BackendError on index read failure."),
+            _make_chunk("Paris is the capital of France.", ordinal=1),
+        ]
+        store = self._store_with_chunks(chunks)
+        retriever = BM25SparseRetriever(store=store)
+
+        q1 = Query(id=QueryId("q3"), text="what errors does the retrieval pipeline raise")
+        hits1 = retriever.retrieve(q1)
+        assert len(hits1) > 0, "Question-form query must return relevant chunks."
+
+        q2 = Query(id=QueryId("q4"), text="What is the capital of France?")
+        hits2 = retriever.retrieve(q2)
+        assert len(hits2) > 0, (
+            "Stopword-heavy question 'What is the capital of France?' must find "
+            "the document stating the fact. If this fails, stopword filtering or "
+            "the OR-fallback is broken."
+        )
+
     def test_retriever_is_sparse_retriever_instance(self) -> None:
         from beacon_kb.storage.sqlite import SQLiteStore
 
@@ -461,9 +524,9 @@ class TestBM25SparseRetriever:
         # Query with exact error code token
         q = Query(id=QueryId("q1"), text="ERROR_CODE_404")
         hits = retriever.retrieve(q)
-        if len(hits) >= 2:
-            # The chunk with the exact error code should rank first.
-            assert "ERROR_CODE_404" in hits[0].chunk.text
+        assert len(hits) >= 1, "Expected at least 1 hit for ERROR_CODE_404 query"
+        # The chunk with the exact error code should rank first.
+        assert "ERROR_CODE_404" in hits[0].chunk.text
 
     def test_corpus_id_filter_scopes_results(self) -> None:
         """Query with corpus_id must scope results to that corpus."""
@@ -503,8 +566,8 @@ class TestEmbedderDenseRetriever:
         retriever = EmbedderDenseRetriever(store=store, embedder=embedder, similarity="cosine")
         q = Query(id=QueryId("q1"), text="document content")
         hits = retriever.retrieve(q)
-        if hits:
-            assert all(h.dense_score is not None for h in hits)
+        assert hits, "Expected hits for dense retriever with populated store"
+        assert all(h.dense_score is not None for h in hits)
 
     def test_only_dense_score_set(self) -> None:
         store, embedder = self._populated_store_with_embedder()
@@ -639,8 +702,8 @@ class TestSparseOnlyDegradedMode:
         q = Query(id=QueryId("q1"), text="python programming")
         hits = sparse_retriever.retrieve(q)
         # Must return BM25 hits without any embedder.
-        if hits:
-            assert all(h.sparse_score is not None for h in hits)
+        assert hits, "Expected BM25 hits for 'python programming' query"
+        assert all(h.sparse_score is not None for h in hits)
 
     def test_sparse_only_no_dense_scores(self) -> None:
         chunks = [_make_chunk("test content here")]
@@ -686,10 +749,10 @@ class TestIndependentRanks:
         q = Query(id=QueryId("q1"), text="python")
         hits = retriever.retrieve(q)
         # BM25 scores may exceed 1.0; not clamped or normalized.
-        if len(hits) >= 2:
-            scores = [h.sparse_score for h in hits if h.sparse_score is not None]
-            # At least some score may exceed 1.0 or differ in meaningful way
-            assert len(scores) == 2
+        assert len(hits) >= 2, "Expected at least 2 hits for 'python' query with 2 chunks"
+        scores = [h.sparse_score for h in hits if h.sparse_score is not None]
+        # At least some score may exceed 1.0 or differ in meaningful way
+        assert len(scores) == 2
 
     def test_dense_and_sparse_from_same_store_are_independent(self) -> None:
         """Sparse and dense hits are produced independently; no bleed-through."""

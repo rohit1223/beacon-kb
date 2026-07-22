@@ -110,6 +110,11 @@ def build_context_block(evidence_texts: list[tuple[str, str]]) -> str:
     the untrusted block early: the returned block contains exactly one real
     open delimiter and exactly one real close delimiter.
 
+    ROADMAP: The first provider Generator implementation MUST assemble its
+    context section through this function so the untrusted-context delimiters
+    and prompt-injection neutralization are applied consistently.  Bypassing
+    build_context_block leaves those defenses unapplied.
+
     Args:
         evidence_texts: Ordered list of (citation_label, chunk_text) pairs.
 

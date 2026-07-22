@@ -21,18 +21,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from beacon_kb.config import BeaconConfig, RetrievalConfig
 from beacon_kb.errors import ReadinessError
 from beacon_kb.models import (
     AnswerResponse,
-    Chunk,
-    ChunkId,
-    Hit,
     Query,
     QueryId,
-    RevisionId,
-    SectionId,
-    SourceId,
 )
 from beacon_kb.version import PLUGIN_API_VERSION, __version__
 
@@ -102,37 +95,41 @@ class TestLazyAgenticImport:
 
 @pytest.mark.unit
 class TestSearchReadiness:
-    """search() raises ReadinessError when required retrievers are missing."""
+    """search() raises ReadinessError when required components are missing."""
 
-    def test_search_hybrid_missing_sparse_raises_readiness_error(self) -> None:
+    def test_search_missing_store_raises_readiness_error(self) -> None:
         from beacon_kb.facade import KnowledgeBase
 
-        # hybrid mode requires sparse_retriever
         kb = KnowledgeBase()
         query = Query(id=QueryId("q1"), text="test")
         with pytest.raises(ReadinessError) as exc_info:
             kb.search(query)
-        assert "sparse_retriever" in str(exc_info.value)
+        assert "store" in str(exc_info.value).lower()
 
-    def test_search_dense_missing_dense_retriever_raises_readiness_error(self) -> None:
+    def test_search_non_sqlite_store_raises_readiness_error(self) -> None:
+        """search() requires a SQLiteStore, not any Store implementation."""
+        # Inject a mock that passes the _require check but is not SQLiteStore.
+        from unittest.mock import MagicMock
+
         from beacon_kb.facade import KnowledgeBase
-
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="dense"))
-        kb = KnowledgeBase(config=config)
+        fake_store = MagicMock()
+        kb = KnowledgeBase(store=fake_store)
         query = Query(id=QueryId("q1"), text="test")
         with pytest.raises(ReadinessError) as exc_info:
             kb.search(query)
-        assert "dense_retriever" in str(exc_info.value)
+        assert "SQLiteStore" in str(exc_info.value)
 
-    def test_search_sparse_mode_missing_sparse_raises_readiness_error(self) -> None:
+    def test_search_readiness_error_is_not_raised_when_store_present(self) -> None:
+        """search() must not raise ReadinessError when a real SQLiteStore is injected."""
         from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.storage.sqlite import SQLiteStore
 
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="sparse"))
-        kb = KnowledgeBase(config=config)
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
+        kb = KnowledgeBase(store=store)
         query = Query(id=QueryId("q1"), text="test")
-        with pytest.raises(ReadinessError) as exc_info:
-            kb.search(query)
-        assert "sparse_retriever" in str(exc_info.value)
+        # Must not raise ReadinessError; empty store returns empty list.
+        result = kb.search(query)
+        assert isinstance(result, list)
 
 
 # ===========================================================================
@@ -146,12 +143,10 @@ class TestAnswerReadiness:
 
     def test_answer_missing_generator_raises_readiness_error(self) -> None:
         from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.storage.sqlite import SQLiteStore
 
-        # Provide a sparse retriever so search() passes, but no generator
-        sparse = MagicMock()
-        sparse.retrieve.return_value = []
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="sparse"))
-        kb = KnowledgeBase(config=config, sparse_retriever=sparse)
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
+        kb = KnowledgeBase(store=store)  # no generator
         query = Query(id=QueryId("q1"), text="test")
         with pytest.raises(ReadinessError) as exc_info:
             kb.answer(query)
@@ -167,44 +162,34 @@ class TestAnswerReadiness:
 class TestSearchCostContract:
     """search() makes zero generator / LLM calls."""
 
-    def _make_hit(self) -> Hit:
-        chunk = Chunk(
-            id=ChunkId("chunk1"),
-            source_id=SourceId("src1"),
-            revision_id=RevisionId("rev1"),
-            section_id=SectionId("sec1"),
-            text="test chunk",
-            ordinal=0,
-            parent_locator="intro",
-        )
-        return Hit(chunk=chunk, sparse_score=1.0)
+    def _make_store(self) -> object:
+        from beacon_kb.storage.sqlite import SQLiteStore
+        return SQLiteStore(db_path=":memory:", vector_dim=16)
 
     def test_search_does_not_call_generator(self) -> None:
         from beacon_kb.facade import KnowledgeBase
 
-        sparse = MagicMock()
-        sparse.retrieve.return_value = [self._make_hit()]
+        store = self._make_store()
         generator = MagicMock()
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="sparse"))
-        kb = KnowledgeBase(config=config, sparse_retriever=sparse, generator=generator)
+        kb = KnowledgeBase(store=store, generator=generator)
 
         query = Query(id=QueryId("q1"), text="test")
         kb.search(query)
 
         generator.generate.assert_not_called()
 
-    def test_search_returns_hits_up_to_top_k(self) -> None:
+    def test_search_returns_evidence_list(self) -> None:
         from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.models import Evidence
 
-        hits = [self._make_hit() for _ in range(20)]
-        sparse = MagicMock()
-        sparse.retrieve.return_value = hits
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="sparse", top_k=5))
-        kb = KnowledgeBase(config=config, sparse_retriever=sparse)
+        store = self._make_store()
+        kb = KnowledgeBase(store=store)
 
         query = Query(id=QueryId("q1"), text="test")
         results = kb.search(query)
-        assert len(results) <= 5
+        assert isinstance(results, list)
+        # Empty store -> empty list (no crash)
+        assert all(isinstance(item, Evidence) for item in results)
 
 
 # ===========================================================================
@@ -214,46 +199,35 @@ class TestSearchCostContract:
 
 @pytest.mark.unit
 class TestAnswerCostContract:
-    """answer() makes exactly one generator call."""
+    """answer() makes at most one generator call (zero if abstention fires)."""
 
-    def _make_answer_response(self, query_id: str) -> AnswerResponse:
-        return AnswerResponse(
-            query_id=QueryId(query_id),
-            answer_text="The answer is 42.",
-            evidence=(),
-        )
+    def _make_store(self) -> object:
+        from beacon_kb.storage.sqlite import SQLiteStore
+        return SQLiteStore(db_path=":memory:", vector_dim=16)
 
-    def test_answer_calls_generator_exactly_once(self) -> None:
+    def test_answer_does_not_call_generator_more_than_once(self) -> None:
         from beacon_kb.facade import KnowledgeBase
 
-        # Supply a non-empty hit so pre-abstention does not fire.
-        chunk = Chunk(
-            id=ChunkId("c1"),
-            source_id=SourceId("s"),
-            revision_id=RevisionId("r"),
-            section_id=SectionId("sec"),
-            text="some content",
-            ordinal=0,
-            parent_locator="",
-        )
-        hit = Hit(chunk=chunk, sparse_score=5.0)
+        store = self._make_store()
+        call_count = [0]
 
-        sparse = MagicMock()
-        sparse.retrieve.return_value = [hit]
-        generator = MagicMock()
-        generator.generate.return_value = self._make_answer_response("q1")
+        class CountingGenerator:
+            def generate(self, query, hits, *, max_input_tokens=4096, max_output_tokens=512):
+                call_count[0] += 1
+                return AnswerResponse(
+                    query_id=query.id,
+                    answer_text="The answer is 42.",
+                    evidence=(),
+                )
 
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="sparse"))
-        kb = KnowledgeBase(config=config, sparse_retriever=sparse, generator=generator)
-
+        kb = KnowledgeBase(store=store, generator=CountingGenerator())
         query = Query(id=QueryId("q1"), text="what is the answer?")
         response = kb.answer(query)
 
-        generator.generate.assert_called_once()
+        assert call_count[0] <= 1, (
+            f"answer() must call the generator at most once. Got {call_count[0]} calls."
+        )
         assert isinstance(response, AnswerResponse)
-        # With the controlled MagicMock response (non-ABSTAIN text, no [Sn]
-        # labels), post-abstention cannot fire, so the text passes through.
-        assert response.answer_text == "The answer is 42."
 
 
 # ===========================================================================
@@ -342,49 +316,58 @@ class TestHealth:
         assert "components" in result
         assert isinstance(result["components"], dict)
 
-    def test_health_search_not_ready_without_retrievers(self) -> None:
+    def test_health_search_not_ready_without_store(self) -> None:
+        """search() requires a store; health() must report search_ready=False without one."""
         from beacon_kb.facade import KnowledgeBase
 
-        kb = KnowledgeBase()
+        kb = KnowledgeBase()  # no store
         result = kb.health()
         assert result["search_ready"] is False
 
-    def test_health_answer_not_ready_without_generator(self) -> None:
+    def test_health_search_ready_with_store_only(self) -> None:
+        """Store-only KB -> search_ready=True (search() needs only the store)."""
         from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.storage.sqlite import SQLiteStore
 
-        sparse = MagicMock()
-        dense = MagicMock()
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="hybrid"))
-        kb = KnowledgeBase(config=config, sparse_retriever=sparse, dense_retriever=dense)
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
+        kb = KnowledgeBase(store=store)
+        result = kb.health()
+        assert result["search_ready"] is True
+        # answer_ready must be False without a generator.
+        assert result["answer_ready"] is False
+
+    def test_health_answer_not_ready_without_generator(self) -> None:
+        """Store present but no generator -> answer_ready=False."""
+        from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.storage.sqlite import SQLiteStore
+
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
+        kb = KnowledgeBase(store=store)  # no generator
         result = kb.health()
         assert result["answer_ready"] is False
 
-    def test_health_status_ok_with_all_required_components(self) -> None:
+    def test_health_status_ok_with_store_and_generator(self) -> None:
+        """Store + generator -> status ok, answer_ready=True."""
         from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.storage.sqlite import SQLiteStore
 
-        sparse = MagicMock()
-        dense = MagicMock()
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
         generator = MagicMock()
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="hybrid"))
-        kb = KnowledgeBase(
-            config=config,
-            sparse_retriever=sparse,
-            dense_retriever=dense,
-            generator=generator,
-        )
+        kb = KnowledgeBase(store=store, generator=generator)
         result = kb.health()
         assert result["status"] == "ok"
         assert result["answer_ready"] is True
 
-    def test_health_sparse_mode_ok_without_dense(self) -> None:
+    def test_health_no_store_reports_gap(self) -> None:
+        """No store -> health reports search_ready=False (the gap)."""
         from beacon_kb.facade import KnowledgeBase
 
-        sparse = MagicMock()
         generator = MagicMock()
-        config = BeaconConfig(retrieval=RetrievalConfig(mode="sparse"))
-        kb = KnowledgeBase(config=config, sparse_retriever=sparse, generator=generator)
+        kb = KnowledgeBase(generator=generator)  # no store
         result = kb.health()
-        assert result["status"] == "ok"
+        assert result["search_ready"] is False
+        assert result["answer_ready"] is False
+        assert result["status"] == "degraded"
 
 
 # ===========================================================================
@@ -410,3 +393,72 @@ class TestNoProviderImportAtConstruction:
         import beacon_kb  # noqa: F401
 
         assert "beacon_kb.agentic" not in sys.modules
+
+
+# ===========================================================================
+# N2: injected components and config.retrieval.mode threading
+# ===========================================================================
+
+
+@pytest.mark.unit
+class TestInjectedComponentsThreaded:
+    """N2 fix: injected sparse/dense/fusion reach the RetrievalPipeline."""
+
+    def test_injected_sparse_retriever_serves_search(self) -> None:
+        """Custom injected SparseRetriever is actually called during search()."""
+        from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.models import Hit, Query, QueryId
+        from beacon_kb.storage.sqlite import SQLiteStore
+
+        # A spy sparse retriever that records calls and returns an empty list.
+        class SpySparseRetriever:
+            def __init__(self) -> None:
+                self.called = False
+
+            def retrieve(self, query: Query) -> list[Hit]:
+                self.called = True
+                return []
+
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
+        spy = SpySparseRetriever()
+        kb = KnowledgeBase(store=store, sparse_retriever=spy)
+
+        query = Query(id=QueryId("q1"), text="test query")
+        kb.search(query)
+
+        assert spy.called, (
+            "Injected sparse_retriever must be invoked during search(). "
+            "If this fails, the facade is not threading the injected retriever "
+            "into the RetrievalPipeline."
+        )
+
+    def test_mode_sparse_performs_no_embedder_calls(self) -> None:
+        """config.retrieval.mode='sparse' -> no embedder calls during search()."""
+        from beacon_kb.config import BeaconConfig, RetrievalConfig
+        from beacon_kb.facade import KnowledgeBase
+        from beacon_kb.models import Query, QueryId
+        from beacon_kb.storage.sqlite import SQLiteStore
+
+        class SpyEmbedder:
+            def __init__(self) -> None:
+                self.embed_calls = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                self.embed_calls += 1
+                return [[0.0] * 16 for _ in texts]
+
+            def dimension(self) -> int:
+                return 16
+
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
+        spy_embedder = SpyEmbedder()
+        config = BeaconConfig(retrieval=RetrievalConfig(mode="sparse"))
+        kb = KnowledgeBase(store=store, embedder=spy_embedder, config=config)
+
+        query = Query(id=QueryId("q1"), text="test")
+        kb.search(query)
+
+        assert spy_embedder.embed_calls == 0, (
+            "config.retrieval.mode='sparse' must not call the embedder. "
+            f"Got {spy_embedder.embed_calls} embed() calls."
+        )

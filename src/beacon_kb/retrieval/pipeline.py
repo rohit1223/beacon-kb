@@ -18,10 +18,10 @@ Pipeline stages (in order):
 Design rules enforced here:
 - Zero LLM calls anywhere in this pipeline.
 - Deterministic for identical inputs (hash-stable IDs, RRF tie-break).
-- per-query top_k overrides config when set to a non-default value.  Decision
-  site: Query.top_k != DEFAULT_TOP_K means the caller supplied an explicit
-  override; otherwise config.retrieval.top_k is used.  This resolves the
-  ROADMAP item "Query.top_k vs config.retrieval.top_k reconciliation (Epic 03)".
+- per-query top_k overrides config when explicitly set.  Decision site:
+  Query.top_k is not None means the caller supplied an explicit override;
+  otherwise config.retrieval.top_k is used.  This resolves the ROADMAP item
+  "Query.top_k vs config.retrieval.top_k reconciliation (Epic 03)".
 - Packed evidence never exceeds the configured token budget.
 - A result-count + token recap (BudgetSummary) is always computed before
   evidence is returned to the caller.
@@ -41,7 +41,7 @@ from beacon_kb.models import Evidence, Query
 from beacon_kb.retrieval.context import ContextExpansionResult, expand_and_pack
 from beacon_kb.retrieval.dense import EmbedderDenseRetriever
 from beacon_kb.retrieval.diversity import collapse_near_duplicates, mmr_diversify
-from beacon_kb.retrieval.filters import FilterSpec
+from beacon_kb.retrieval.filters import FilterSpec, apply_filters
 from beacon_kb.retrieval.fusion import RRFusion
 from beacon_kb.retrieval.query import QueryVariants, prepare_query
 from beacon_kb.retrieval.rerank import rerank_hits
@@ -50,7 +50,14 @@ from beacon_kb.retrieval.sparse import BM25SparseRetriever
 from beacon_kb.tokens import BudgetSummary, summarize_budget
 
 if TYPE_CHECKING:
-    from beacon_kb.protocols import Embedder, Reranker, TokenCounter
+    from beacon_kb.protocols import (
+        DenseRetriever,
+        Embedder,
+        Fusion,
+        Reranker,
+        SparseRetriever,
+        TokenCounter,
+    )
     from beacon_kb.storage.sqlite import SQLiteStore
 
 
@@ -58,16 +65,13 @@ if TYPE_CHECKING:
 # Query.top_k vs config.retrieval.top_k reconciliation
 #
 # Decision (ROADMAP Epic 03):
-#   The default top_k on the Query model is 10 (matches models.py default).
-#   When a caller sets Query.top_k to a value different from DEFAULT_QUERY_TOP_K,
-#   that per-query value wins.  Otherwise the pipeline uses config.retrieval.top_k.
+#   Query.top_k is now int | None (None = "not set by caller").
+#   When Query.top_k is not None, that per-query value wins.
+#   Otherwise the pipeline uses config.retrieval.top_k (operator-configured default).
 #
-#   This keeps query callers in control (they can lower top_k for fast lookups)
-#   without silently ignoring the operator-configured default.
+#   This removes the 10-vs-10 ambiguity where Query(top_k=10) was indistinguishable
+#   from the old default=10 sentinel.
 # ---------------------------------------------------------------------------
-
-_DEFAULT_QUERY_TOP_K: int = 10
-"""Default top_k from models.Query; used as the "not overridden" sentinel."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,15 @@ class RetrievalPipeline:
         embedder:         Optional Embedder.  None -> sparse-only degraded mode.
         reranker:         Optional Reranker.  None -> skip rerank stage.
         token_counter:    Optional TokenCounter.  None -> HeuristicTokenCounter.
+        sparse_retriever: Optional SparseRetriever override.  When provided, this
+                          instance is used for sparse retrieval instead of the
+                          internally constructed BM25SparseRetriever.  Allows the
+                          facade to thread injected custom retrievers through.
+        dense_retriever:  Optional DenseRetriever override.  When provided, this
+                          instance is used for dense retrieval instead of the
+                          internally constructed EmbedderDenseRetriever.
+        fusion:           Optional Fusion override.  When provided, this instance
+                          is used for score fusion instead of the default RRFusion.
         similarity:       Declared vector similarity direction (default 'cosine').
         dup_threshold:    Jaccard threshold for near-duplicate collapse (default 0.85).
         lambda_mmr:       MMR lambda trade-off [0,1] (default 1.0 = no reordering).
@@ -131,6 +144,9 @@ class RetrievalPipeline:
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         token_counter: TokenCounter | None = None,
+        sparse_retriever: SparseRetriever | None = None,
+        dense_retriever: DenseRetriever | None = None,
+        fusion: Fusion | None = None,
         similarity: str = "cosine",
         dup_threshold: float = 0.85,
         lambda_mmr: float = 1.0,
@@ -161,28 +177,21 @@ class RetrievalPipeline:
         else:
             self._token_budget = self._config.answer.max_input_tokens
 
-        # Build sub-components.
-        self._sparse = BM25SparseRetriever(store=store, column_weights=column_weights)
-        self._dense = EmbedderDenseRetriever(
-            store=store,
-            embedder=embedder,
-            similarity=similarity,
-        )
-        self._fusion = RRFusion()
+        # Store optional component overrides (may be None -> self-build at search time).
+        self._sparse_retriever_override: SparseRetriever | None = sparse_retriever
+        self._dense_retriever_override: DenseRetriever | None = dense_retriever
+
+        # Build sub-components (fusion is light-weight, always construct directly).
+        self._fusion: Fusion = fusion if fusion is not None else RRFusion()
 
     def _resolve_top_k(self, query: Query) -> int:
         """Resolve effective top_k: per-query value overrides config when set.
 
-        Decision (documented per ROADMAP "Query.top_k vs config.retrieval.top_k
-        reconciliation"):
-          If query.top_k != DEFAULT_QUERY_TOP_K (10), the caller explicitly
-          set a top_k override - use it.  Otherwise fall back to
-          config.retrieval.top_k which is the operator-configured default.
-
-        This allows individual queries to request fewer candidates for speed
-        without silently ignoring the globally-configured default.
+        Query.top_k is None when the caller did not set an explicit override;
+        in that case the operator-configured config.retrieval.top_k is used.
+        A non-None query.top_k means the caller explicitly requested that count.
         """
-        if query.top_k != _DEFAULT_QUERY_TOP_K:
+        if query.top_k is not None:
             return query.top_k
         return self._config.retrieval.top_k
 
@@ -221,6 +230,10 @@ class RetrievalPipeline:
             BackendError: On store read failure.
         """
         # 1. Query policy - validate and prepare text variants.
+        # ROADMAP Epic 04: query_variants.sparse_text and .dense_text are captured
+        # in diagnostics but do not yet drive separate sparse/dense retrieval passes.
+        # Both passes currently use query.text.  Epic 04 must wire sparse_retriever
+        # to query_variants.sparse_text and dense_retriever to query_variants.dense_text.
         query_variants = prepare_query(query)  # raises ValueError on empty text
 
         # Apply per-query or config top_k.
@@ -237,23 +250,61 @@ class RetrievalPipeline:
         # This ensures custom column_weights or other constructor-time retriever
         # configuration is honoured; the filter_spec is the only per-query override.
         filter_spec = filters if filters is not None else FilterSpec()
-        sparse_retriever = BM25SparseRetriever(
-            store=self._store,
-            filter_spec=filter_spec,
-            column_weights=self._column_weights,
-        )
-        dense_retriever = EmbedderDenseRetriever(
-            store=self._store,
-            embedder=self._embedder,
-            similarity=self._similarity,
-            filter_spec=filter_spec,
-        )
 
-        # 2. Sparse BM25 retrieval.
-        sparse_hits = sparse_retriever.retrieve(effective_query)
+        # When a filter is active, over-fetch candidates to compensate for filter
+        # attrition: retrievers apply the filter AFTER fetching top_k candidates,
+        # so a strict filter can starve results well below effective_top_k.
+        # Heuristic multiplier of 3x is a documented tuning point.
+        filter_is_active = bool(
+            filter_spec.source_uris
+            or filter_spec.tags
+            or filter_spec.media_types
+            or filter_spec.acl_ids
+            or filter_spec.require_after is not None
+        )
+        fetch_query = (
+            Query(
+                id=query.id,
+                text=query.text,
+                corpus_id=query.corpus_id,
+                top_k=effective_top_k * 3,
+            )
+            if filter_is_active
+            else effective_query
+        )
+        # Build or reuse sparse retriever: prefer the injected override when provided.
+        if self._sparse_retriever_override is not None:
+            sparse_retriever: SparseRetriever = self._sparse_retriever_override
+        else:
+            sparse_retriever = BM25SparseRetriever(
+                store=self._store,
+                filter_spec=filter_spec,
+                column_weights=self._column_weights,
+            )
+
+        # Build or reuse dense retriever: prefer the injected override when provided.
+        if self._dense_retriever_override is not None:
+            dense_retriever: DenseRetriever = self._dense_retriever_override
+        else:
+            dense_retriever = EmbedderDenseRetriever(
+                store=self._store,
+                embedder=self._embedder,
+                similarity=self._similarity,
+                filter_spec=filter_spec,
+            )
+
+        # 2. Sparse BM25 retrieval (over-fetched when a filter is active).
+        # apply_filters is called unconditionally after each leg so that injected
+        # override retrievers (which have no access to filter_spec) also honour the
+        # per-query FilterSpec.  Built-in retrievers already filter internally, so
+        # this call is idempotent for them - it is purely a safety net for overrides.
+        sparse_hits = apply_filters(sparse_retriever.retrieve(fetch_query), filter_spec)
 
         # 3. Dense embedding retrieval (empty list when no embedder configured).
-        dense_hits = dense_retriever.retrieve(effective_query)
+        # Same unconditional apply_filters pattern as the sparse leg (see above).
+        # NOTE: mode="dense" is not yet a dedicated pipeline mode - the sparse leg
+        # still runs when an embedder is present; a "dense-only" mode is on the roadmap.
+        dense_hits = apply_filters(dense_retriever.retrieve(fetch_query), filter_spec)
 
         # 4. RRF fusion.
         fused_hits = self._fusion.fuse(sparse_hits, dense_hits)

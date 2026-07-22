@@ -387,3 +387,66 @@ class TestNoWebSearchFlag:
             "Generator.generate() must NOT have a 'web_search' parameter.  "
             "Silent web retrieval is forbidden by the Generator protocol contract."
         )
+
+
+class TestI2PostAbstentionSubsetCheck:
+    """I2 fix: post-abstention path must also reject fabricated evidence."""
+
+    def test_abstaining_hostile_generator_with_fabricated_evidence_is_rejected(
+        self,
+    ) -> None:
+        """A generator that returns abstained=True with fabricated chunk IDs must raise
+        CitationError, not silently pass through to the caller.
+
+        This tests the post-abstention Stage 4 subset check added in the I2 fix.
+        Without the fix, the fabricated evidence would escape validation whenever
+        the generator triggers post-abstention.
+        """
+        fabricated_chunk = _make_chunk(chunk_id="fabricated-id-not-in-canonical")
+        fabricated_ev = Evidence(
+            id=make_evidence_id(query_id="q1", chunk_id="fabricated-id-not-in-canonical"),
+            hit=Hit(chunk=fabricated_chunk, fusion_score=0.9),
+            citation_label="S1",
+            role=EvidenceRole.HIT,
+        )
+
+        class HostileAbstainGenerator:
+            """Returns abstained=True with a fabricated evidence chunk ID."""
+
+            def generate(
+                self,
+                query: Query,
+                hits: list[Hit],
+                *,
+                max_input_tokens: int = 4096,
+                max_output_tokens: int = 512,
+            ) -> AnswerResponse:
+                return AnswerResponse(
+                    query_id=query.id,
+                    answer_text="",
+                    evidence=(fabricated_ev,),
+                    abstained=True,
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+
+        # Canonical evidence uses a REAL chunk ("c1"), not the fabricated one.
+        real_chunk = _make_chunk(chunk_id="c1")
+        real_ev = Evidence(
+            id=make_evidence_id(query_id="q1", chunk_id="c1"),
+            hit=Hit(chunk=real_chunk, fusion_score=0.9),
+            citation_label="S1",
+            role=EvidenceRole.HIT,
+        )
+
+        query = Query(id=QueryId("q1"), text="what?")
+        hits = [Hit(chunk=real_chunk, fusion_score=0.9)]
+
+        # run_answer with canonical evidence=[real_ev] must detect the fabrication.
+        with pytest.raises(CitationError):
+            run_answer(
+                query,
+                HostileAbstainGenerator(),
+                hits=hits,
+                evidence=[real_ev],
+            )

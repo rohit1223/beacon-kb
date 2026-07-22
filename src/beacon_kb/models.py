@@ -406,6 +406,11 @@ class Fingerprint:
     description: str = ""
 
 
+# Default top-k fallback used by store and dense retriever when no per-query
+# override is supplied.  Shared constant prevents the value from drifting
+# between the two sites (sqlite.py retrieve() and dense.py retrieve()).
+DEFAULT_TOP_K: int = 10
+
 @dataclass(frozen=True, slots=True)
 class Query:
     """A user query issued against a knowledge base."""
@@ -413,7 +418,8 @@ class Query:
     id: QueryId
     text: str
     corpus_id: CorpusId | None = None
-    top_k: int = 10
+    top_k: int | None = None
+    """Per-query top-k override.  None means use config.retrieval.top_k."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,7 +445,12 @@ class Hit:
     """Cosine similarity score. Higher is more relevant. None if not retrieved via dense."""
 
     fusion_score: float | None = None
-    """Reciprocal rank fusion or weighted-combination score. Higher is better. None if not fused."""
+    """Reciprocal rank fusion or weighted-combination score. Higher is better. None if not fused.
+
+    RRF score scale note: the upper bound of the RRF score is 2/k where k is the
+    rank-constant used in the fusion formula (default k=60 -> upper bound ~0.033).
+    Scores are always positive; higher means higher combined rank across retrievers."""
+
 
     rerank_score: float | None = None
     """Cross-encoder relevance score. Higher is more relevant. None if not reranked."""

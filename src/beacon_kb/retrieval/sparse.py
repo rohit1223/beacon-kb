@@ -36,6 +36,21 @@ Per-column bm25() weighting adoption (Epic 03 obligation, ROADMAP item done):
   Dropping OR-boosts entirely would reduce precision for those token types.
   The two mechanisms are orthogonal and work together.
 
+Stopword handling (C2 fix):
+  Common English function words (how, do, I, what, is, the, ...) are removed from
+  the AND-required token set so queries like "how do I install the parser" and
+  "What is the capital of France?" are not forced to match all stopwords verbatim.
+  Stopwords are defined in _STOPWORDS (a module-level frozenset, ~30 words).
+  If ALL tokens are stopwords, the full original token set is kept to avoid an
+  empty query.
+
+OR-fallback for zero-hit AND queries:
+  If the AND-over-content-words query returns zero rows, the retriever
+  automatically re-runs the same query with OR between all non-stopword tokens.
+  BM25 still ranks the OR results.  This maximises recall for stopword-heavy
+  natural-language questions while keeping the default AND precision for queries
+  that contain meaningful content words.
+
 Importing this module performs no side effects.
 """
 
@@ -69,6 +84,21 @@ _DEFAULT_WEIGHTS: tuple[float, float, float] = (
     _DEFAULT_HEADING_WEIGHT,
     _DEFAULT_CODE_WEIGHT,
 )
+
+
+# ---------------------------------------------------------------------------
+# English stopword list (curated, ~30 common function words).
+# These words carry very little retrieval signal on their own, so they are
+# excluded from the AND-required token set to avoid zero-recall on
+# natural-language questions.  All comparisons are case-insensitive (tokens
+# are lowercased before lookup).
+# ---------------------------------------------------------------------------
+
+_STOPWORDS: frozenset[str] = frozenset({
+    "how", "do", "i", "what", "is", "the", "a", "an", "of", "to",
+    "in", "for", "on", "at", "my", "me", "can", "does", "are", "was",
+    "were", "be", "it", "this", "that", "and", "or", "with", "from", "by",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -112,37 +142,94 @@ def _extract_boost_tokens(text: str) -> list[str]:
     return tokens
 
 
+def _content_tokens(raw_tokens: list[str]) -> list[str]:
+    """Return the subset of tokens that are not English stopwords.
+
+    Comparison is case-insensitive: 'How', 'HOW', and 'how' all match the
+    stopword.  If every token is a stopword, the full list is returned as-is
+    to avoid producing an empty query.
+
+    Args:
+        raw_tokens: Whitespace-split tokens from the original query text.
+
+    Returns:
+        Non-stopword tokens, or the original list when all are stopwords.
+    """
+    filtered = [t for t in raw_tokens if t.lower() not in _STOPWORDS]
+    return filtered if filtered else raw_tokens
+
+
 def _build_fts5_query(text: str) -> str:
     """Build a FTS5 MATCH expression from query text with exact-token boosts.
 
-    Preserves the original text as the primary match expression.
-    Extracted boost tokens are appended as OR clauses with phrase quotes
-    so FTS5 treats them as exact-phrase matches rather than tokenized terms.
-    This does NOT alter dense candidate ordering.
+    Base expression: each non-stopword whitespace-delimited token is
+    individually quoted so FTS5 applies its own tokenizer to each term.
+    The implicit conjunction (AND semantics) between terms matches documents
+    that contain ALL non-stopword query tokens regardless of word order or
+    exact phrasing.  Common English function words (how, do, I, what, is, the,
+    ...) are excluded from the AND set so queries like "how do I install the
+    parser" do not return 0 hits because the document text lacks those words.
+    If all tokens are stopwords, they are all included to avoid an empty query.
 
-    This mechanism is retained on top of per-column bm25() weighting because
-    it provides additive precision for technical identifiers that appear verbatim
-    in the query.  See module docstring for the full design rationale.
+    AND was chosen over OR for precision: querying N content tokens AND-style
+    retrieves documents that are semantically more aligned to ALL aspects of
+    the query.  For recall-sensitive cases, an OR-fallback is applied in
+    BM25SparseRetriever.retrieve() when the AND query yields zero rows.
+
+    Boost tokens (error codes, commands, identifiers) are appended as OR
+    clauses using phrase quotes for exact-match boosting; these are additive
+    to column weighting and do not change the base AND expression.
 
     Args:
         text: Query text (original or sparse-variant).
 
     Returns:
-        FTS5 MATCH expression string.
+        FTS5 MATCH expression string (AND over content words).
     """
-    # FTS5 special characters that must be escaped in unquoted terms.
-    # We use phrase quoting ("...") for the whole query to avoid injection.
-    # However, double-quotes inside the query must be doubled for FTS5.
-    escaped = text.replace('"', '""')
-    base_expr = f'"{escaped}"'
+    tokens = text.split()
+    if not tokens:
+        # Degenerate empty query: return a safe always-false expression.
+        return '""'
+
+    # Drop stopwords from the AND-required set (fallback keeps all if all stopwords).
+    content_toks = _content_tokens(tokens)
+
+    # Build per-token phrase terms - implicit AND between space-separated terms.
+    token_terms = " ".join(
+        f'"{tok.replace(chr(34), chr(34) * 2)}"' for tok in content_toks
+    )
 
     boost_tokens = _extract_boost_tokens(text)
     if not boost_tokens:
-        return base_expr
+        return token_terms
 
-    # Append exact token phrases as OR clauses.
-    boost_clauses = " OR ".join(f'"{tok.replace(chr(34), chr(34)*2)}"' for tok in boost_tokens)
-    return f"({base_expr} OR {boost_clauses})"
+    # Append exact technical identifier phrases as OR clauses (additive boost).
+    boost_clauses = " OR ".join(
+        f'"{tok.replace(chr(34), chr(34) * 2)}"' for tok in boost_tokens
+    )
+    return f"({token_terms} OR {boost_clauses})"
+
+
+def _build_fts5_or_query(text: str) -> str:
+    """Build a FTS5 MATCH expression using OR between all non-stopword tokens.
+
+    Used as a fallback when the primary AND query returns zero rows.  OR
+    semantics maximise recall; BM25 still ranks the results so the most
+    relevant documents surface first.
+
+    Args:
+        text: Query text (original or sparse-variant).
+
+    Returns:
+        FTS5 MATCH expression string (OR over content words).
+    """
+    tokens = text.split()
+    if not tokens:
+        return '""'
+    content_toks = _content_tokens(tokens)
+    return " OR ".join(
+        f'"{tok.replace(chr(34), chr(34) * 2)}"' for tok in content_toks
+    )
 
 
 class BM25SparseRetriever:
@@ -186,6 +273,9 @@ class BM25SparseRetriever:
         Uses per-column bm25() weights via store.retrieve(weights=...) to boost
         heading matches over body text and code over prose.  Exact-token OR-boosts
         for technical identifiers are also applied for additive precision.
+        Stopwords are dropped from the AND-required set (see module docstring).
+        If the AND query yields zero rows, an OR-fallback over content tokens
+        is issued automatically (OR-fallback, BM25 still ranks).
         Filters are applied before candidates are returned.
 
         Args:
@@ -199,7 +289,7 @@ class BM25SparseRetriever:
         Raises:
             BackendError: On FTS5 index read failure.
         """
-        # Build FTS5 query expression with exact-token boosts (retained, see module docstring).
+        # Build FTS5 AND query expression (stopwords dropped, exact-token boosts added).
         fts_expr = _build_fts5_query(query.text)
 
         # Issue retrieval via the store with per-column bm25() weights and the
@@ -211,6 +301,17 @@ class BM25SparseRetriever:
             top_k=query.top_k,
         )
         hits: list[Hit] = self._store.retrieve(boosted_query, weights=self._column_weights)
+
+        # OR-fallback: if AND over content words returned nothing, re-run with OR.
+        if not hits:
+            or_expr = _build_fts5_or_query(query.text)
+            or_query = Query(
+                id=query.id,
+                text=or_expr,
+                corpus_id=query.corpus_id,
+                top_k=query.top_k,
+            )
+            hits = self._store.retrieve(or_query, weights=self._column_weights)
 
         # Apply provider-neutral filters before returning.
         return apply_filters(hits, self._filter_spec)

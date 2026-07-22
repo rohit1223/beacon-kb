@@ -17,6 +17,7 @@ Importing this module performs no side effects.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -97,6 +98,24 @@ def rerank_hits(
 
     t_end = _clock()
     latency = t_end - t_start
+
+    # Guard: reranker must return the same chunk IDs it received, including
+    # duplicates.  Counter (multiset) equality catches both added/removed IDs
+    # and duplicate-ID returns that set equality would miss.
+    expected_ids = Counter(str(h.chunk.id) for h in to_rerank)
+    returned_ids = Counter(str(h.chunk.id) for h in reranked)
+    if expected_ids != returned_ids:
+        return RerankResult(
+            hits=list(hits),
+            window=len(to_rerank),
+            latency_seconds=latency,
+            failure=ValueError(
+                f"Reranker returned chunk IDs (multiset) that do not match input window. "
+                f"Expected counts: {dict(expected_ids)!r}, "
+                f"Returned counts: {dict(returned_ids)!r}. "
+                f"Falling back to fused order."
+            ),
+        )
 
     final_hits = list(reranked) + list(tail)
     return RerankResult(

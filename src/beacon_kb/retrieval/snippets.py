@@ -137,10 +137,18 @@ def build_snippet(
 
     # Ensure we always have at least some content.
     if raw_start >= raw_end:
-        raw_start = 0
-        raw_end = min(len(chunk_text), max_chars)
+        # Degenerate case (no whitespace to snap to): center the window.
+        center_pos = len(chunk_text) // 2
+        raw_start = max(0, center_pos - max_chars // 2)
+        raw_end = min(len(chunk_text), raw_start + max_chars)
 
     excerpt = chunk_text[raw_start:raw_end].strip()
+    # Recompute span offsets to reflect stripped excerpt position in chunk_text.
+    if excerpt:
+        stripped_start = chunk_text.find(excerpt, raw_start)
+        if stripped_start >= 0:
+            raw_start = stripped_start
+            raw_end = stripped_start + len(excerpt)
 
     return Snippet(
         text=excerpt,

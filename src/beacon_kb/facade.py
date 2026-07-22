@@ -25,15 +25,18 @@ Importing this module performs no side effects and does NOT import
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from beacon_kb.retrieval.pipeline import RetrievalPipeline
 
 from beacon_kb.config import BeaconConfig
 from beacon_kb.errors import ReadinessError
 from beacon_kb.models import (
     AgenticTrace,
     AnswerResponse,
-    ChunkId,
-    Hit,
+    Evidence,
+    EvidenceRole,
     Query,
     SyncReport,
 )
@@ -115,6 +118,8 @@ class KnowledgeBase:
         )
         self._observer: ProgressObserver | None = observer
         self._clock: Clock = clock if clock is not None else monotonic_clock()
+        # Cached RetrievalPipeline (built on first search() call; None until then).
+        self._pipeline: RetrievalPipeline | None = None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -237,11 +242,13 @@ class KnowledgeBase:
     # search()
     # ------------------------------------------------------------------
 
-    def search(self, query: Query) -> list[Hit]:
-        """Retrieve relevant chunks for *query* with zero LLM calls.
+    def search(self, query: Query) -> list[Evidence]:
+        """Retrieve relevant evidence for *query* with zero LLM calls.
 
-        Runs the configured retrieval pipeline (sparse, dense, or hybrid) and
-        optionally reranks the results.  No generative LLM is called.
+        Runs the unified RetrievalPipeline (sparse BM25, dense embedding,
+        RRF fusion, optional rerank, diversity, bounded context expansion,
+        and match-centered snippet construction).  Returns Evidence records
+        with stable [S1]-style citation labels, EvidenceRole, and Snippets.
 
         Cost contract: zero LLM calls.
 
@@ -249,36 +256,48 @@ class KnowledgeBase:
             query: Query record with text and optional corpus_id filter.
 
         Returns:
-            Ordered list of Hit records (higher score = more relevant).
+            Ordered list of Evidence records.  Primary HITs first, then
+            CONTEXT spans.  Each Evidence carries a stable citation_label
+            (e.g. 'S1'), an EvidenceRole, and a match-centered Snippet.
 
         Raises:
-            ReadinessError: If the required retrievers are not injected.
+            ReadinessError: If store (SQLiteStore) is not injected.
             BackendError:   If the backend index read fails.
         """
-        mode = self._config.retrieval.mode
-        hits: list[Hit] = []
+        from beacon_kb.retrieval.pipeline import RetrievalPipeline
+        from beacon_kb.storage.sqlite import SQLiteStore
 
-        if mode in {"sparse", "hybrid"}:
-            sparse = self._require(self._sparse_retriever, "sparse_retriever")
-            hits = sparse.retrieve(query)
+        store = self._require(self._store, "store")
+        if not isinstance(store, SQLiteStore):
+            raise ReadinessError(
+                f"KnowledgeBase.search() requires a SQLiteStore instance. "
+                f"Got: {type(store).__name__}. "
+                f"Inject a SQLiteStore via the 'store' constructor argument."
+            )
 
-        if mode in {"dense", "hybrid"}:
-            dense = self._require(self._dense_retriever, "dense_retriever")
-            dense_hits = dense.retrieve(query)
-            if mode == "dense":
-                hits = dense_hits
-            elif self._fusion is not None:
-                hits = self._fusion.fuse(hits, dense_hits)
-            else:
-                # No fusion: concatenate and dedup by chunk_id.
-                seen: set[ChunkId] = {h.chunk.id for h in hits}
-                hits = list(hits) + [h for h in dense_hits if h.chunk.id not in seen]
+        # Determine effective embedder: config.retrieval.mode=="sparse" disables dense.
+        # (N2 fix: document that sparse mode means embedder=None in the pipeline.)
+        effective_embedder = (
+            None if self._config.retrieval.mode == "sparse" else self._embedder
+        )
 
-        if self._reranker is not None:
-            hits = self._reranker.rerank(query, hits)
-
-        top_k = self._config.retrieval.top_k
-        return hits[:top_k]
+        # Build the RetrievalPipeline once (cached) rather than per-search call.
+        # The pipeline is stateless except for the injected components, which do
+        # not change after construction; caching avoids redundant object creation.
+        if self._pipeline is None:
+            self._pipeline = RetrievalPipeline(
+                store=store,
+                config=self._config,
+                embedder=effective_embedder,
+                reranker=self._reranker,
+                token_counter=self._token_counter,
+                # Thread injected retriever/fusion overrides (N2 fix).
+                sparse_retriever=self._sparse_retriever,
+                dense_retriever=self._dense_retriever,
+                fusion=self._fusion,
+            )
+        result = self._pipeline.search(query)
+        return result.evidence
 
     # ------------------------------------------------------------------
     # answer()
@@ -331,8 +350,11 @@ class KnowledgeBase:
         # record a real elapsed_retrieval_s (run_answer cannot measure it:
         # it receives pre-computed hits).
         t_retrieval_start = self._clock.now()
-        hits = self.search(query)
+        evidence = self.search(query)
         elapsed_retrieval_s = self._clock.now() - t_retrieval_start
+
+        # Extract Hit objects for the generator (Generator protocol takes list[Hit]).
+        hits = [ev.hit for ev in evidence if ev.role == EvidenceRole.HIT]
 
         self._emit(
             {
@@ -344,10 +366,13 @@ class KnowledgeBase:
         )
 
         # Delegate to the generation stage: pre/post abstention + citation validation.
+        # The canonical Evidence list is threaded through so citation validation
+        # checks the generator's output against what was actually retrieved.
         response, _diag = run_answer(
             query,
             generator,
             hits,
+            evidence=evidence,
             config=self._config.answer,
             observer=self._observer,
             query_variants=query_variants,
@@ -456,11 +481,17 @@ class KnowledgeBase:
         For each injected component, reports whether it is present.  Full
         health checks (ping, connectivity) are deferred to later epics.
 
-        Returns:
-            Dict with key 'status' ('ok' or 'degraded') and 'components' dict.
-        """
-        required_for_search = ["sparse_retriever", "dense_retriever"]
+        Readiness semantics (N1 fix):
+        - search_ready: the store is present (search() only requires the store).
+        - answer_ready: store + generator (answer() additionally needs the generator).
+        - The injected sparse_retriever / dense_retriever / fusion components are
+          reflected in the 'components' dict for diagnostics but do NOT gate
+          search_ready; search() builds its own internal pipeline from the store.
 
+        Returns:
+            Dict with key 'status' ('ok' or 'degraded'), 'search_ready',
+            'answer_ready', 'corpus_health', and 'components' dict.
+        """
         components: dict[str, dict[str, Any]] = {}
         for name, component in [
             ("connector", self._connector),
@@ -480,17 +511,8 @@ class KnowledgeBase:
                 "type": type(component).__name__ if component is not None else None,
             }
 
-        # Determine overall status.
-        mode = self._config.retrieval.mode
-        required: list[str]
-        if mode == "sparse":
-            required = ["sparse_retriever"]
-        elif mode == "dense":
-            required = ["dense_retriever"]
-        else:
-            required = required_for_search
-
-        search_ready = all(components[k]["present"] for k in required)
+        # search() only requires the store; answer() additionally requires the generator.
+        search_ready = components["store"]["present"]
         answer_ready = search_ready and components["generator"]["present"]
 
         overall = "ok" if answer_ready else "degraded"

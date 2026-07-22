@@ -213,7 +213,10 @@ class AnswerConfig:
         max_input_tokens:    Hard budget for prompt tokens.
         max_output_tokens:   Hard budget for completion tokens.
         abstain_threshold:   Minimum evidence quality below which the generator
-                             must abstain.  Range [0.0, 1.0].
+                             must abstain.  Range [0.0, 1.0].  Default 0.0
+                             (gate disabled).  IMPORTANT: RRF fusion_scores are
+                             bounded by 2/k (approx 0.033 at k=60); a threshold
+                             above ~0.03 silences all hybrid answers.
         temperature:         Sampling temperature.  Range [0.0, 2.0].
     """
 
@@ -222,7 +225,7 @@ class AnswerConfig:
     model: str = ""
     max_input_tokens: int = 4096
     max_output_tokens: int = 512
-    abstain_threshold: float = 0.5
+    abstain_threshold: float = 0.0
     temperature: float = 0.0
 
     def __post_init__(self) -> None:
@@ -231,7 +234,7 @@ class AnswerConfig:
         if not (0.0 <= self.abstain_threshold <= 1.0):
             raise ConfigError(
                 f"'answer.abstain_threshold' must be in [0.0, 1.0]. "
-                f"Got: {self.abstain_threshold!r}. Fix: set abstain_threshold = 0.5."
+                f"Got: {self.abstain_threshold!r}. Fix: set abstain_threshold between 0.0 and 1.0."
             )
         if not (0.0 <= self.temperature <= 2.0):
             raise ConfigError(

@@ -34,10 +34,10 @@ from beacon_kb.models import (
 )
 from beacon_kb.retrieval.context import expand_and_pack
 from beacon_kb.retrieval.filters import FilterSpec
-from beacon_kb.retrieval.pipeline import _DEFAULT_QUERY_TOP_K, RetrievalPipeline, SearchResult
+from beacon_kb.retrieval.pipeline import RetrievalPipeline, SearchResult
 from beacon_kb.retrieval.snippets import Snippet, build_snippet
 from beacon_kb.storage.sqlite import SQLiteStore
-from beacon_kb.testing import FakeEmbedder, FakeReranker
+from beacon_kb.testing import FakeEmbedder, FakeReranker, FakeSparseRetriever
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -503,6 +503,82 @@ class TestExpandAndPack:
         chunk_ids = [str(ev.hit.chunk.id) for ev in result.evidence]
         assert len(chunk_ids) == len(set(chunk_ids)), "Duplicate chunk in evidence"
 
+    def test_oversized_rank2_skipped_and_labels_contiguous(self) -> None:
+        """Hand-ordered hit list: rank-2 item overflows budget, later smaller items fit.
+
+        This distinguishes post-packing relabeling (correct) from pre-packing
+        assignment (wrong): if labels were assigned before packing, the surviving
+        items would carry S1 and S3..Sn with a gap.  Post-packing relabeling
+        must produce contiguous S1..Sn labels with no gaps.
+        """
+        from beacon_kb.models import Hit
+        from beacon_kb.tokens import HeuristicTokenCounter
+
+        counter = HeuristicTokenCounter()
+
+        # Build three chunks of very different sizes:
+        #   rank-1: small text
+        #   rank-2: very large text (will overflow the budget)
+        #   rank-3: small text (fits after rank-2 is skipped)
+        small_text = "short doc"
+        large_text = " ".join(["word"] * 200)  # ~200 tokens, will overflow small budget
+        small_text2 = "another brief item"
+
+        chunks = self._make_linked_chunks(3)
+        # Override text so sizes are controlled.
+        from dataclasses import replace
+        c1 = replace(chunks[0], text=small_text)
+        c2 = replace(chunks[1], text=large_text)
+        c3 = replace(chunks[2], text=small_text2)
+
+        store = _make_store()
+        store.upsert_chunks([c1, c2, c3])
+        query = Query(id=QueryId("q-t1"), text="doc")
+
+        # Order hits: rank-1=c1, rank-2=c2 (oversized), rank-3=c3 (fits).
+        hits = [
+            Hit(chunk=c1, sparse_score=3.0),
+            Hit(chunk=c2, sparse_score=2.0),
+            Hit(chunk=c3, sparse_score=1.0),
+        ]
+
+        # Budget: enough for c1 and c3 but NOT for c2.
+        tok_c1 = counter.count_tokens(c1.text)
+        tok_c2 = counter.count_tokens(c2.text)
+        tok_c3 = counter.count_tokens(c3.text)
+        # Budget = tok_c1 + tok_c3 + 5 (headroom), but less than tok_c2.
+        budget = tok_c1 + tok_c3 + 5
+        assert budget < tok_c2, "Test invariant: budget must not fit the large chunk"
+
+        result = expand_and_pack(
+            query, hits, store,
+            token_budget=budget,
+            counter=counter,
+            max_neighbor_hops=0,  # no context expansion so labels are purely from primary hits
+            max_context_per_hit=0,
+        )
+
+        primary_ev = [ev for ev in result.evidence if ev.role == EvidenceRole.HIT]
+
+        # rank-2 item (c2) must be absent from evidence.
+        included_chunk_ids = {str(ev.hit.chunk.id) for ev in primary_ev}
+        assert str(c2.id) not in included_chunk_ids, (
+            "Oversized rank-2 chunk must be excluded when it does not fit the budget"
+        )
+
+        # rank-3 item (c3) must be present (it fits after skipping c2).
+        assert str(c3.id) in included_chunk_ids, (
+            "Rank-3 chunk must be included after the oversized rank-2 chunk is skipped"
+        )
+
+        # Labels must be contiguous S1, S2 (no gap at S2 because c2 was skipped pre-label).
+        labels = [ev.citation_label for ev in primary_ev]
+        expected_labels = [f"S{i+1}" for i in range(len(primary_ev))]
+        assert labels == expected_labels, (
+            f"Citation labels must be contiguous S1..Sn after post-packing relabeling. "
+            f"Got {labels!r}, expected {expected_labels!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # RetrievalPipeline integration tests
@@ -702,15 +778,15 @@ class TestRetrievalPipeline:
         assert len(hit_evidence) <= 2
 
     def test_config_top_k_used_when_query_default(self) -> None:
-        """When query.top_k == DEFAULT (10), config.retrieval.top_k governs."""
+        """When query.top_k is None (not set), config.retrieval.top_k governs."""
         store = _make_store()
         chunks = [_make_chunk(f"content {i}", ordinal=i) for i in range(20)]
         _populate_store(store, chunks)  # staged workflow: stage -> upsert -> promote
 
         config = BeaconConfig(retrieval=RetrievalConfig(top_k=3))
         pipeline = RetrievalPipeline(store=store, config=config, token_budget=50000)
-        # Query uses the default top_k=10 (== _DEFAULT_QUERY_TOP_K), so config's 3 wins.
-        q = Query(id=QueryId("q1"), text="content", top_k=_DEFAULT_QUERY_TOP_K)
+        # Query leaves top_k unset (None), so config's 3 wins.
+        q = Query(id=QueryId("q1"), text="content")
         result = pipeline.search(q)
         hit_evidence = [ev for ev in result.evidence if ev.role == EvidenceRole.HIT]
         assert len(hit_evidence) <= 3
@@ -756,6 +832,50 @@ class TestRetrievalPipeline:
             if ev.role == EvidenceRole.HIT:
                 assert str(ev.hit.chunk.source_id) == source_id_a
 
+    def test_injected_override_retriever_honours_filter_spec(self) -> None:
+        """N3 regression: FilterSpec must not be bypassed when an override retriever is injected.
+
+        An override retriever has no access to the FilterSpec; the pipeline must
+        apply apply_filters() unconditionally after each retriever leg so that
+        blocked-source hits are excluded and allowed-source hits survive.
+        """
+        store = _make_store()
+        chunk_allowed = _make_chunk("allowed content", uri=_URI_A, ordinal=0)
+        chunk_blocked = _make_chunk("blocked content", uri=_URI_B, ordinal=0)
+
+        # Populate store (needed for snippet resolution in the pipeline).
+        _populate_store(store, [chunk_allowed])
+        _populate_store(store, [chunk_blocked])
+
+        # The override retriever returns BOTH chunks - it is unaware of FilterSpec.
+        override_sparse = FakeSparseRetriever(chunks=[chunk_allowed, chunk_blocked])
+
+        # FilterSpec that allows only chunk_allowed's source.
+        allowed_source_id = str(chunk_allowed.source_id)
+        spec = FilterSpec(source_uris=frozenset({allowed_source_id}))
+
+        pipeline = RetrievalPipeline(
+            store=store,
+            sparse_retriever=override_sparse,
+            token_budget=4096,
+        )
+        q = Query(id=QueryId("q-n3"), text="content")
+        result = pipeline.search(q, filters=spec)
+
+        hit_source_ids = {
+            str(ev.hit.chunk.source_id)
+            for ev in result.evidence
+            if ev.role == EvidenceRole.HIT
+        }
+        # Blocked source must not appear even though the override retriever returned it.
+        assert str(chunk_blocked.source_id) not in hit_source_ids, (
+            "Blocked-source hit must be excluded by apply_filters on the override leg"
+        )
+        # Allowed source must survive.
+        assert allowed_source_id in hit_source_ids, (
+            "Allowed-source hit must pass through apply_filters on the override leg"
+        )
+
     def test_evidence_ids_resolve_to_active_revision(self) -> None:
         """Evidence IDs must be stable and derived from query_id + chunk_id."""
         store = _make_store()
@@ -766,14 +886,14 @@ class TestRetrievalPipeline:
         result = pipeline.search(q)
 
         hit_evidence = [ev for ev in result.evidence if ev.role == EvidenceRole.HIT]
-        if hit_evidence:
-            ev = hit_evidence[0]
-            # Re-derive the expected ID to confirm stability.
-            from beacon_kb.models import make_evidence_id
-            expected_id = make_evidence_id(
-                query_id=str(q.id), chunk_id=str(ev.hit.chunk.id)
-            )
-            assert str(ev.id) == str(expected_id)
+        assert hit_evidence, "Expected at least one HIT evidence item for 'stable content' query"
+        ev = hit_evidence[0]
+        # Re-derive the expected ID to confirm stability.
+        from beacon_kb.models import make_evidence_id
+        expected_id = make_evidence_id(
+            query_id=str(q.id), chunk_id=str(ev.hit.chunk.id)
+        )
+        assert str(ev.id) == str(expected_id)
 
     def test_sparse_only_no_embedder(self) -> None:
         """Pipeline without embedder must still return results via sparse BM25."""
@@ -1115,8 +1235,8 @@ class TestSparseWeightedBm25Adoption:
         store.upsert_chunks([chunk])
         q = Query(id=QueryId("q1"), text="python", top_k=5)
         hits = store.retrieve(q, weights=(1.0, 10.0, 5.0))
-        if hits:
-            assert all(h.sparse_score is not None for h in hits)
+        assert hits, "Expected hits from store.retrieve with weights for 'python' query"
+        assert all(h.sparse_score is not None for h in hits)
 
     def test_heading_weight_boosts_heading_matches(self) -> None:
         """Heading column weight > text weight should boost heading-matched chunks."""
@@ -1137,9 +1257,9 @@ class TestSparseWeightedBm25Adoption:
         q = Query(id=QueryId("q1"), text="python", top_k=5)
         # With high heading weight, chunk_a (python in heading) should rank first.
         hits = store.retrieve(q, weights=(1.0, 100.0, 1.0))
-        if len(hits) >= 2:
-            # The chunk with "python" in heading (section_locator) should rank higher.
-            assert chunk_a.id in {h.chunk.id for h in hits[:1]}
+        assert len(hits) >= 2, "Expected at least 2 hits for heading-weight ranking test"
+        # The chunk with "python" in heading (section_locator) should rank higher.
+        assert chunk_a.id in {h.chunk.id for h in hits[:1]}
 
     def test_weighted_retrieve_without_weights_still_works(self) -> None:
         """retrieve(weights=None) must work (backward compatible)."""
@@ -1163,6 +1283,6 @@ class TestSparseWeightedBm25Adoption:
         q = Query(id=QueryId("q1"), text="python content")
         hits = retriever.retrieve(q)
         # Must return hits and each must have sparse_score set.
-        if hits:
-            assert all(h.sparse_score is not None for h in hits)
-            assert all(h.dense_score is None for h in hits)
+        assert hits, "Expected hits from BM25SparseRetriever for 'python content' query"
+        assert all(h.sparse_score is not None for h in hits)
+        assert all(h.dense_score is None for h in hits)

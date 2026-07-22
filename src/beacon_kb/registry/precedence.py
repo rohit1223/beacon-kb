@@ -90,8 +90,10 @@ def clear_registry() -> None:
 
 
 def list_registered(group: str) -> list[str]:
-    """Return the names of all explicitly registered plugins for *group*.
+    """Return the names of all registered plugins for *group*.
 
+    Includes both explicitly registered plugins and built-in defaults.
+    Built-in names are appended after explicit names (explicit wins on conflict).
     Does not trigger entry-point discovery.
 
     Args:
@@ -100,30 +102,50 @@ def list_registered(group: str) -> list[str]:
     Returns:
         List of registered plugin names (may be empty).
     """
-    return list(_explicit.get(group, {}).keys())
+    names: list[str] = list(_explicit.get(group, {}).keys())
+    if group in _builtins:
+        builtin_name, _ = _builtins[group]
+        if builtin_name not in names:
+            names.append(builtin_name)
+    return names
 
 
 def describe(group: str, name: str) -> dict[str, Any]:
     """Return a description dict for the registered plugin *name* in *group*.
+
+    Checks explicit registrations first, then built-in defaults.
 
     Args:
         group: Entry-point group string.
         name:  Plugin name.
 
     Returns:
-        Dict with at least ``group``, ``name``, and ``instance`` keys.
+        Dict with ``group``, ``name``, ``instance``, and ``builtin`` keys.
+        ``builtin`` is True for built-in defaults, False for explicitly
+        registered plugins.
 
     Raises:
-        PluginNotFound: If the name is not registered explicitly.
+        PluginNotFound: If the name is not registered explicitly or as a builtin.
     """
     group_reg = _explicit.get(group, {})
-    if name not in group_reg:
-        raise PluginNotFound(group=group, name=name)
-    return {
-        "group": group,
-        "name": name,
-        "instance": group_reg[name],
-    }
+    if name in group_reg:
+        return {
+            "group": group,
+            "name": name,
+            "instance": group_reg[name],
+            "builtin": False,
+        }
+    # Check builtins.
+    if group in _builtins:
+        builtin_name, instance = _builtins[group]
+        if name == builtin_name:
+            return {
+                "group": group,
+                "name": name,
+                "instance": instance,
+                "builtin": True,
+            }
+    raise PluginNotFound(group=group, name=name)
 
 
 # ---------------------------------------------------------------------------
