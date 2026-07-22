@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 
 from beacon_kb.errors import IngestionError
-from beacon_kb.ingestion.identity import make_file_source_uri
+from beacon_kb.ingestion.identity import PROVISIONAL_FINGERPRINT, make_file_source_uri
 from beacon_kb.ingestion.media import is_text_media_type, resolve_media_type
 from beacon_kb.models import (
     RawDocument,
@@ -48,6 +48,13 @@ class FilesystemConnector:
         pipeline_fingerprint: Optional stable string identifying the active
             pipeline configuration.  Used to build
             :class:`~beacon_kb.models.RevisionId` values.
+            Defaults to :data:`~beacon_kb.ingestion.identity.PROVISIONAL_FINGERPRINT`
+            (``"unpinned"``).  The revision_id produced by the connector is a
+            *provisional* content identity - it captures the content hash but
+            not the full pipeline configuration.  The sync pipeline ALWAYS
+            re-derives the authoritative revision_id with the real pipeline
+            fingerprint; callers must not treat connector-produced revision IDs
+            as final.
         external_base_url: Optional base URL for citation link mapping.
             When provided, :meth:`external_url` returns a public URL derived
             from the file's path relative to *root*.  When absent, returns
@@ -64,7 +71,7 @@ class FilesystemConnector:
         corpus: str,
         patterns: list[str],
         encoding: str = "utf-8",
-        pipeline_fingerprint: str = "v1",
+        pipeline_fingerprint: str = PROVISIONAL_FINGERPRINT,
         external_base_url: str | None = None,
     ) -> None:
         self._root: pathlib.Path = pathlib.Path(root).resolve()

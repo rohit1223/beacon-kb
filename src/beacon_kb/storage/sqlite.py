@@ -1380,9 +1380,167 @@ class SQLiteStore:
             return None
         return dict(row)
 
+    def get_latest_build_run(self, *, corpus_id: CorpusId) -> dict[str, Any] | None:
+        """Return the most recent build run for *corpus_id*, or None if none exist.
+
+        "Most recent" is defined by latest started_at_iso, with rowid as tiebreaker.
+
+        Args:
+            corpus_id: Corpus namespace.
+
+        Returns:
+            Dict of run fields, or None if no build runs recorded for this corpus.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            row = self._conn.execute(
+                """
+                SELECT * FROM build_runs
+                WHERE corpus_id = ?
+                ORDER BY started_at_iso DESC, rowid DESC
+                LIMIT 1
+                """,
+                (str(corpus_id),),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise BackendError(f"get_latest_build_run failed: {exc}") from exc
+        if row is None:
+            return None
+        return dict(row)
+
     # ------------------------------------------------------------------
     # Schema metadata
     # ------------------------------------------------------------------
+
+    def count_active_chunks(self, *, corpus_id: CorpusId) -> int:
+        """Return the number of active chunks for *corpus_id*.
+
+        Args:
+            corpus_id: Corpus namespace.
+
+        Returns:
+            Non-negative integer count of active chunks.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM chunks WHERE corpus_id = ? AND active = 1",
+                (str(corpus_id),),
+            ).fetchone()
+        except Exception as exc:
+            raise BackendError(f"count_active_chunks failed: {exc}") from exc
+        return int(row["c"]) if row else 0
+
+    def get_staged_chunks(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> list[Chunk]:
+        """Return all staged (active=0) chunks for *revision_id* in *corpus_id*.
+
+        Used by RevisionValidator to inspect staged data before promotion
+        without reaching into the private _conn attribute.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            List of Chunk records with active=0 for this revision.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM chunks WHERE revision_id = ? AND corpus_id = ? AND active = 0",
+                (str(revision_id), str(corpus_id)),
+            ).fetchall()
+        except Exception as exc:
+            raise BackendError(f"get_staged_chunks failed: {exc}") from exc
+        return [_row_to_chunk(row) for row in rows]
+
+    def retire_revision(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> None:
+        """Retire an active revision by setting its chunks inactive and removing its pointer.
+
+        This is the inverse of promote_revision: it removes a source from the
+        active search index without deleting the revision record itself.
+        Used when a source is deleted from the connector between syncs.
+
+        Steps performed atomically:
+        1. Find all active chunks for *revision_id* in *corpus_id*.
+        2. Set those chunks to active=0.
+        3. Remove their FTS5 rows.
+        4. Set embeddings for those chunks to active=0.
+        5. Delete the active_revision_pointer for the source.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The active revision to retire.
+
+        Raises:
+            BackendError: On SQLite write failure.
+        """
+        try:
+            self._conn.execute("BEGIN")
+
+            # Find all active chunks for this revision.
+            chunk_rows = self._conn.execute(
+                "SELECT chunk_id FROM chunks"
+                " WHERE revision_id = ? AND corpus_id = ? AND active = 1",
+                (str(revision_id), str(corpus_id)),
+            ).fetchall()
+            chunk_ids = [row["chunk_id"] for row in chunk_rows]
+
+            if chunk_ids:
+                placeholders = ",".join("?" * len(chunk_ids))
+                self._conn.execute(
+                    f"UPDATE chunks SET active = 0 WHERE chunk_id IN ({placeholders})",  # noqa: S608
+                    chunk_ids,
+                )
+                self._conn.execute(
+                    f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})",  # noqa: S608
+                    chunk_ids,
+                )
+                self._conn.execute(
+                    f"UPDATE embeddings SET active = 0 WHERE chunk_id IN ({placeholders})",  # noqa: S608
+                    chunk_ids,
+                )
+
+            # Remove the active_revision_pointer for this source.
+            rev_row = self._conn.execute(
+                "SELECT source_id FROM revisions WHERE revision_id = ? AND corpus_id = ?",
+                (str(revision_id), str(corpus_id)),
+            ).fetchone()
+            if rev_row:
+                src_row = self._conn.execute(
+                    "SELECT canonical_uri FROM sources WHERE source_id = ? AND corpus_id = ?",
+                    (rev_row["source_id"], str(corpus_id)),
+                ).fetchone()
+                if src_row:
+                    self._conn.execute(
+                        "DELETE FROM active_revision_pointers "
+                        "WHERE corpus_id = ? AND canonical_uri = ?",
+                        (str(corpus_id), src_row["canonical_uri"]),
+                    )
+
+            self._conn.execute("COMMIT")
+        except sqlite3.Error as exc:
+            try:
+                self._conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise BackendError(f"retire_revision failed: {exc}") from exc
 
     def schema_version(self) -> int:
         """Return the highest applied migration version number.

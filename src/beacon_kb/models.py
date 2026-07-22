@@ -218,6 +218,40 @@ class IngestionChange(enum.Enum):
     """Pipeline fingerprint changed; full re-ingest required regardless of content."""
 
 
+class CorpusHealth(enum.Enum):
+    """Health state of a corpus, derived exclusively from durable store state.
+
+    State machine (precedence in order when multiple conditions apply):
+
+    EMPTY
+        No active revision exists AND no build runs have ever been recorded.
+        The corpus has never been synced.
+
+    BUILDING
+        At least one build run is currently in-progress (status='running').
+        May coexist with an active revision if an incremental sync is running.
+
+    READY
+        At least one active revision exists.
+        Takes precedence over FAILED: if an active revision is present but the
+        latest build run failed, the corpus is still READY because the prior
+        active revision remains fully searchable.
+
+    FAILED
+        The latest build run has status='failed' AND no active revision exists.
+        The corpus has never had a successful sync, or a failed sync wiped the
+        last active revision.
+
+    Transitions are derived by ``SyncEngine.health()`` from the durable store;
+    they are never inferred from in-memory counters.
+    """
+
+    EMPTY = "empty"
+    BUILDING = "building"
+    READY = "ready"
+    FAILED = "failed"
+
+
 # ---------------------------------------------------------------------------
 # Domain records - frozen dataclasses
 # ---------------------------------------------------------------------------
@@ -288,6 +322,20 @@ class RawDocument:
 
     source_id: SourceId
     revision_id: RevisionId
+    """Connector-supplied revision identity.
+
+    IMPORTANT: The revision_id produced by a connector (e.g. FilesystemConnector
+    or MemoryConnector) is a *provisional* content identity.  It captures the
+    content hash, but the pipeline_fingerprint baked into it uses the connector's
+    default sentinel (``PROVISIONAL_FINGERPRINT = "unpinned"``), NOT the full
+    pipeline fingerprint.
+
+    The sync pipeline ALWAYS re-derives the authoritative revision_id using the
+    real pipeline fingerprint before staging or promoting any revision.  Callers
+    that receive a RawDocument from a connector must not assume its revision_id
+    is the final authoritative ID that will appear in the store.
+    """
+
     content: str
     media_type: str
     encoding: str = "utf-8"
@@ -501,6 +549,20 @@ class SyncReport:
 
     Records are immutable. errors is a tuple of string error messages
     (not exception objects) to keep the record serializable.
+
+    build_run_id identifies the active build run; use it to look up the run
+    in the store via ``store.get_build_run(build_run_id=str(report.build_run_id))``.
+
+    timings holds (stage_name, elapsed_seconds) pairs for each pipeline stage
+    that completed during this sync.  Stage names match the 'stage' key emitted
+    to the ProgressObserver.
+
+    warnings holds non-fatal warning messages collected during the sync.
+    Each entry is a human-readable string (e.g. validation warnings, skipped
+    enrichment).  Warnings do not prevent promotion; errors do.
+
+    failed_sources holds the canonical URIs of sources that could not be
+    ingested in this run (fetch failure, parse failure, staging failure, etc.).
     """
 
     build_run_id: BuildRunId
@@ -513,3 +575,13 @@ class SyncReport:
     errors: tuple[str, ...]
     duration_seconds: float = 0.0
     pipeline_fingerprint: str = ""
+    warnings: tuple[str, ...] = ()
+    """Non-fatal warnings collected during the sync (does not block promotion)."""
+
+    timings: tuple[tuple[str, float], ...] = ()
+    """Stage-name/elapsed-seconds pairs, one per completed pipeline stage.
+    Frozen-friendly: stored as a tuple of (stage_name, seconds) pairs.
+    """
+
+    failed_sources: tuple[str, ...] = ()
+    """Canonical URIs of sources that could not be fully ingested this run."""

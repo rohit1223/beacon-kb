@@ -12,6 +12,24 @@ from __future__ import annotations
 import pathlib
 import urllib.parse
 
+# ---------------------------------------------------------------------------
+# Provisional fingerprint sentinel
+# ---------------------------------------------------------------------------
+
+PROVISIONAL_FINGERPRINT: str = "unpinned"
+"""Sentinel value for connector-supplied revision IDs that are content-
+identity placeholders only.
+
+Connector implementations (e.g. FilesystemConnector, MemoryConnector) use
+this value as their default pipeline_fingerprint so that callers can
+identify connector-supplied revision IDs as *provisional*: they capture
+the content hash but not the full pipeline fingerprint.
+
+The sync pipeline ALWAYS re-derives the authoritative revision_id with
+the real pipeline fingerprint (see SyncEngine.sync).
+Connectors must NOT claim that their provisional revision IDs are final.
+"""
+
 
 def canonicalize_path(path: str) -> str:
     """Return a stable ``file://`` URI for *path*.
