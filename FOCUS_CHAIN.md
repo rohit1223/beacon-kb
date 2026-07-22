@@ -29,11 +29,11 @@
 
 ### Track C: Hybrid Retrieval, Context, and Grounded Answers (Epic 03, parallel with Track B - depends: Track A complete; joins Track B at chunking and sync boundaries)
 
-- [ ] 11. EPIC-03 TASK-03.1.1 [L | 6f | ~520 LOC] Implement sparse and dense candidate retrieval with typed scores - depends: 02.1.1
-- [ ] 12. EPIC-03 TASK-03.1.2 [M | 3f | ~380 LOC] Add RRF fusion, optional reranking, and diversity - depends: 03.1.1
+- [x] 11. EPIC-03 TASK-03.1.1 [L | 6f | ~520 LOC] Implement sparse and dense candidate retrieval with typed scores - depends: 02.1.1
+- [x] 12. EPIC-03 TASK-03.1.2 [M | 3f | ~380 LOC] Add RRF fusion, optional reranking, and diversity - depends: 03.1.1
   ↳ Commit checkpoint after TASK-03.1.2 (hybrid-retrieval slice around 900 LOC)
-- [ ] 13. EPIC-03 TASK-03.1.3 [M | 4f | ~360 LOC] Assemble bounded context and expose RetrievalPipeline - depends: 03.1.2, 02.3.1
-- [ ] 14. EPIC-03 TASK-03.2.1 [L | 5f | ~560 LOC] Generate grounded answers with validated citations and abstention - depends: 03.1.3, 02.3.2
+- [x] 13. EPIC-03 TASK-03.1.3 [M | 4f | ~360 LOC] Assemble bounded context and expose RetrievalPipeline - depends: 03.1.2, 02.3.1
+- [x] 14. EPIC-03 TASK-03.2.1 [L | 5f | ~560 LOC] Generate grounded answers with validated citations and abstention - depends: 03.1.3, 02.3.2
   ↳ Commit checkpoint after TASK-03.2.1 (grounded single-shot answer contract; end of Epic 03)
 
 ### Track D: Agentic Layer (Epic 04, sequential - depends: Track C complete; multi-corpus parts of Track B)

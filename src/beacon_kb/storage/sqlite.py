@@ -34,6 +34,7 @@ from typing import Any
 
 from beacon_kb.errors import BackendError
 from beacon_kb.models import (
+    DEFAULT_TOP_K,
     Chunk,
     ChunkId,
     ChunkKind,
@@ -1004,6 +1005,10 @@ class SQLiteStore:
             # text, heading, code.  Values are validated floats formatted by
             # Python - never raw user strings - so interpolation is safe.
             bm25_expr = f"bm25(chunks_fts, 0.0, 0.0, {w_text}, {w_heading}, {w_code})"
+        # Query.top_k is now int | None; SQLite LIMIT requires an integer.
+        # None means "use the config default" - fall back to 10 here so the
+        # store layer remains independently usable without a pipeline context.
+        effective_top_k: int = query.top_k if query.top_k is not None else DEFAULT_TOP_K
         try:
             if query.corpus_id is not None:
                 rows = self._conn.execute(
@@ -1029,7 +1034,7 @@ class SQLiteStore:
                     ORDER BY score
                     LIMIT ?
                     """,  # noqa: S608 - bm25_expr is built from validated floats only
-                    (query.text, str(query.corpus_id), query.top_k),
+                    (query.text, str(query.corpus_id), effective_top_k),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
@@ -1054,7 +1059,7 @@ class SQLiteStore:
                     ORDER BY score
                     LIMIT ?
                     """,  # noqa: S608 - bm25_expr is built from validated floats only
-                    (query.text, query.top_k),
+                    (query.text, effective_top_k),
                 ).fetchall()
         except sqlite3.Error as exc:
             raise BackendError(f"FTS5 sparse retrieve failed: {exc}") from exc
@@ -1207,6 +1212,37 @@ class SQLiteStore:
         if row is None:
             return None
         return RevisionId(row["revision_id"])
+
+    # ------------------------------------------------------------------
+    # Source info accessor
+    # ------------------------------------------------------------------
+
+    def get_source_info(self, source_id: str) -> tuple[str, str] | None:
+        """Return (canonical_uri, title) for the given source_id, or None if not found.
+
+        Used by the retrieval pipeline to resolve human-readable provenance fields
+        (canonical_uri and title) for evidence snippets.  The source row is written
+        by stage_revision() so every indexed document has a corresponding record.
+
+        Args:
+            source_id: String form of the SourceId hash.
+
+        Returns:
+            (canonical_uri, title) tuple, or None if no source row exists.
+
+        Raises:
+            BackendError: On SQLite read failure.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT canonical_uri, title FROM sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise BackendError(f"get_source_info failed: {exc}") from exc
+        if row is None:
+            return None
+        return (row["canonical_uri"], row["title"])
 
     # ------------------------------------------------------------------
     # Manifest read-only query helpers
