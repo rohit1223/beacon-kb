@@ -172,29 +172,52 @@ class ChangeSetPlanner:
         scanned_uris: list[str],
         content_hashes: dict[str, str],
         pipeline_fingerprint: str,
+        all_listed_uris: list[str] | None = None,
+        failed_sources: list[str] | None = None,
     ) -> ChangeSet:
         """Classify all scanned sources and detect deletions.
 
         For each URI in *scanned_uris*, calls manifest.revision_status() to
         compare the candidate content hash and pipeline fingerprint against
         the active revision.  Sources in the active manifest but absent from
-        *scanned_uris* are classified as DELETED.
+        the FULL connector listing (and not merely fetch-failed) are classified
+        as DELETED.
 
         Fingerprints are compared on EVERY call regardless of whether the
         content hash changed - this ensures pipeline changes always trigger
         re-ingestion even for unchanged content.
 
+        Deletion safety: a transient fetch failure must NEVER retire an indexed
+        source.  Deletions are therefore planned against the FULL connector
+        listing (*all_listed_uris*), with fetch-failed sources
+        (*failed_sources*) explicitly excluded.  A source is retired only when
+        it is truly absent from list_sources() this pass, not when it was
+        listed but failed to fetch.
+
         Args:
             corpus_id:            Corpus namespace.
-            scanned_uris:         Sorted list of canonical URIs returned by
-                                  the connector for this sync pass.
+            scanned_uris:         Sorted list of canonical URIs that were
+                                  successfully fetched this pass (candidates for
+                                  ingestion classification).
             content_hashes:       Mapping from canonical_uri to content hash.
             pipeline_fingerprint: Pipeline fingerprint computed before scanning.
+            all_listed_uris:      The FULL list of canonical URIs returned by the
+                                  connector's list_sources() this pass.
+                                  Deletions are computed against this set, not
+                                  the (smaller) successfully-fetched set.
+                                  Defaults to *scanned_uris* for backward
+                                  compatibility when the caller does not
+                                  distinguish listing from fetching.
+            failed_sources:       Canonical URIs that were listed but failed to
+                                  fetch this pass.  These are NEVER retired even
+                                  though they are absent from *scanned_uris*.
 
         Returns:
             ChangeSet with all sources classified.
         """
         scanned_set = set(scanned_uris)
+        listed_set = set(all_listed_uris) if all_listed_uris is not None else scanned_set
+        failed_set = set(failed_sources) if failed_sources is not None else set()
         active_uris = set(self._manifest.list_active_uris(corpus_id=corpus_id))
 
         unchanged: list[SourcePlan] = []
@@ -230,8 +253,10 @@ class ChangeSetPlanner:
                 # DELETED is set below; if manifest returns it treat as new.
                 new_sources.append(plan)
 
-        # Sources active in the manifest but absent from the current scan are deleted.
-        deleted_uris = active_uris - scanned_set
+        # Sources active in the manifest but truly absent from the connector's
+        # FULL listing are deleted.  Fetch-failed sources are excluded so a
+        # transient fetch error never retires an indexed source.
+        deleted_uris = active_uris - listed_set - failed_set
         deleted: list[SourcePlan] = [
             SourcePlan(
                 canonical_uri=uri,

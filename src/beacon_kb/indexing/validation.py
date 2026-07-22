@@ -50,7 +50,8 @@ class RevisionValidator:
     Checks:
     1. Chunk count >= expected_chunk_count (if provided).
     2. All chunk IDs in the staged revision are unique.
-    3. All embeddings in the staging area have the correct dimension.
+    3. Staged embeddings: one per staged chunk, each of the expected dimension
+       (guards the provider-miscount failure mode at promotion time).
     4. Neighbor links (prev_chunk_id, next_chunk_id) reference valid chunk IDs
        within the same revision.
     5. Pipeline fingerprint on the revision record matches expected value.
@@ -109,6 +110,32 @@ class RevisionValidator:
         chunk_ids = [str(c.id) for c in staged_chunks]
         if len(chunk_ids) != len(set(chunk_ids)):
             errors.append(f"Duplicate chunk IDs detected in staged revision {revision_id!r}.")
+
+        # 3b. Staged embedding count and dimension.
+        # Every staged chunk must have a staged embedding of the expected
+        # dimension.  This guards the provider-miscount failure mode: if the
+        # embedder returned fewer vectors than chunks, the count check fails
+        # here and the revision is never promoted (chunks with missing vectors
+        # never reach the active layer).
+        try:
+            staged_embeddings = self._store.get_staged_embeddings(
+                corpus_id=corpus_id, revision_id=revision_id
+            )
+        except BackendError as exc:
+            errors.append(f"Cannot load staged embeddings: {exc}")
+            staged_embeddings = []
+
+        if len(staged_embeddings) != chunk_count:
+            errors.append(
+                f"Staged embedding count {len(staged_embeddings)} does not match "
+                f"staged chunk count {chunk_count} for revision {revision_id!r}."
+            )
+        for emb_chunk_id, emb_dim in staged_embeddings:
+            if emb_dim != self._vector_dim:
+                errors.append(
+                    f"Staged embedding for chunk {emb_chunk_id!r} has dimension "
+                    f"{emb_dim}, expected {self._vector_dim}."
+                )
 
         # 4. Neighbor link consistency.
         chunk_id_set = set(chunk_ids)

@@ -716,24 +716,43 @@ class TestRegistryIntegration:
 
         importlib.reload(_b)
 
-    def test_sqlite_store_registered_as_builtin(self) -> None:
+    def test_sqlite_store_not_registered_as_builtin(self) -> None:
+        """No throwaway SQLiteStore is registered as a builtin default.
+
+        Registering a ``:memory:`` / 16-dim instance would mint a live store
+        with the wrong dimension and an isolated in-memory DB if resolved.
+        The STORES group is left empty; callers construct and register a store
+        explicitly with a real db_path and vector_dim.
+        """
         from beacon_kb.registry import groups
         from beacon_kb.registry import precedence as prec
 
-        # The sqlite store should be registered as a builtin
-        builtin = prec._builtins.get(groups.STORES)
-        assert builtin is not None
-        name, _instance = builtin
-        assert name == "sqlite"
+        assert prec._builtins.get(groups.STORES) is None
 
-    def test_sqlite_store_resolves_via_registry(self, tmp_path: Path) -> None:
-        """Resolve 'sqlite' store from the registry by name."""
+    def test_sqlite_store_default_resolve_raises_plugin_not_found(self) -> None:
+        """Resolving the STORES default raises PluginNotFound (no built-in store)."""
+        import pytest
+
+        from beacon_kb import registry
+        from beacon_kb.errors import PluginNotFound
+        from beacon_kb.registry import groups
+
+        with pytest.raises(PluginNotFound):
+            registry.resolve(group=groups.STORES, name="sqlite", protocol=None)
+
+    def test_sqlite_store_resolves_after_explicit_registration(self, tmp_path: Path) -> None:
+        """Explicit construction + register makes the store resolvable by name."""
         from beacon_kb import registry
         from beacon_kb.registry import groups
+        from beacon_kb.registry import precedence as prec
         from beacon_kb.storage.sqlite import SQLiteStore
+
+        store = SQLiteStore(db_path=str(tmp_path / "explicit.db"), vector_dim=16)
+        prec.register(group=groups.STORES, name="sqlite", instance=store)
 
         instance = registry.resolve(group=groups.STORES, name="sqlite", protocol=None)
         assert isinstance(instance, SQLiteStore)
+        store.close()
 
 
 # ---------------------------------------------------------------------------

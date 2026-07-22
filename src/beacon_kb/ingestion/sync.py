@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from beacon_kb.errors import BackendError, IngestionError
 from beacon_kb.indexing.coordinator import RevisionCoordinator
+from beacon_kb.indexing.embedding import BatchEmbedder
 from beacon_kb.indexing.manifest import IndexManifest
 from beacon_kb.ingestion.enrichment import EnrichmentOrchestrator
 from beacon_kb.ingestion.planning import ChangeSet, ChangeSetPlanner, build_pipeline_fingerprint
@@ -139,9 +140,19 @@ class SyncEngine:
         )
 
     def _embedder_model_name(self) -> str:
-        """Return the embedder's model name string for fingerprinting."""
-        # Try common attributes; fall back to class name.
-        for attr in ("model_name", "model", "_model_name"):
+        """Return the embedder's model name string for fingerprinting.
+
+        Prefers the Embedder protocol's ``model_name`` property.  For older
+        embedders that predate that property, a documented duck-typed fallback
+        probes common attributes and finally the class name, so the pipeline
+        never crashes on a legacy embedder.
+        """
+        # Preferred: the Embedder.model_name property (part of the protocol).
+        name = getattr(self._embedder, "model_name", None)
+        if isinstance(name, str) and name:
+            return name
+        # Documented fallback for embedders that predate the model_name property.
+        for attr in ("model", "_model_name"):
             val = getattr(self._embedder, attr, None)
             if isinstance(val, str) and val:
                 return val
@@ -226,13 +237,18 @@ class SyncEngine:
             t_plan = time.monotonic()
             manifest = IndexManifest(self._store)
             planner = ChangeSetPlanner(manifest)
-            # Only plan for sources we successfully fetched.
+            # Only ingest sources we successfully fetched, but plan deletions
+            # over the FULL connector listing (`uris`) so a transient fetch
+            # failure never retires an indexed source.  Fetch-failed sources are
+            # skipped for ingestion but explicitly excluded from deletion.
             fetched_uris = sorted(raw_docs.keys())
             change_set: ChangeSet = planner.plan(
                 corpus_id=corpus_id,
                 scanned_uris=fetched_uris,
                 content_hashes=content_hashes,
                 pipeline_fingerprint=pipeline_fp,
+                all_listed_uris=uris,
+                failed_sources=list(failed_sources),
             )
             sources_scanned = change_set.total_scanned
             stage_timings.append(("plan", time.monotonic() - t_plan))
@@ -248,11 +264,16 @@ class SyncEngine:
             })
 
             if not change_set.needs_work:
-                # Nothing to do: all sources unchanged.
-                final_status = SyncStatus.SUCCESS
+                # No ingestion or deletion work.  This is SUCCESS only when no
+                # source failed to fetch; a transient fetch failure with no
+                # other work still leaves the prior corpus intact but must be
+                # reported as PARTIAL (the fetch-failed source is NOT retired).
+                final_status = (
+                    SyncStatus.PARTIAL if (errors or failed_sources) else SyncStatus.SUCCESS
+                )
                 self._store.finish_build_run(
                     build_run_id=build_run_id_str,
-                    status="success",
+                    status=final_status.value,
                     sources_scanned=sources_scanned,
                     sources_changed=0,
                     chunks_added=0,
@@ -280,6 +301,14 @@ class SyncEngine:
             coordinator = RevisionCoordinator(
                 store=self._store,
                 vector_dim=self._embedder.dimension(),
+            )
+            # Route all embedding through BatchEmbedder so the provider-owned
+            # batch size is honoured and vector count + dimension are validated
+            # (a provider miscount raises BackendError and fails the source,
+            # never silently truncating via zip(strict=False)).
+            batch_embedder = BatchEmbedder(
+                provider=self._embedder,
+                observer=self._observer,
             )
 
             # Sources requiring full ingestion (new, changed, incompatible).
@@ -348,37 +377,36 @@ class SyncEngine:
                         "uri": uri, "chunks": len(all_chunks),
                     })
 
-                    # Enrich (optional, best-effort).
-                    # Enrichment is called for its side effects (e.g. caching, logging,
-                    # external summarization pipeline population).  The returned enriched
-                    # text is not currently stored in the chunk record or used in the
-                    # search index - chunks are stored with their original text only.
-                    # If enriched output should become searchable metadata in the future,
-                    # wire the return value into an 'enriched_text' column on chunks
-                    # and add it to FTS5 and the Store protocol contract (roadmap item).
+                    # Enrich (optional).
+                    # The EnrichmentOrchestrator owns the failure policy: under
+                    # 'best-effort' a failing enricher returns None (ingestion
+                    # continues); under 'raise' it propagates IngestionError.
+                    # We do NOT wrap this in a bare except here - doing so would
+                    # neuter the 'raise' policy.  A propagated IngestionError is
+                    # caught by the per-source handler below, which records the
+                    # source in failed_sources rather than promoting it silently.
+                    # The returned enriched text is not currently persisted or
+                    # indexed - chunks are stored with their original text only.
+                    # Persisting enriched text is tracked in ROADMAP.md
+                    # ("enriched-text persistence").
                     if self._enrichment is not None:
                         self._emit({"stage": "enrich", "status": "start", "uri": uri})
                         for chunk in all_chunks:
-                            try:
-                                self._enrichment.enrich(chunk.text)
-                                # Return value intentionally discarded: see docstring above.
-                            except Exception:  # noqa: S110
-                                pass
+                            self._enrichment.enrich(chunk.text)
+                            # Return value intentionally discarded: see comment above.
                         self._emit({"stage": "enrich", "status": "end", "uri": uri})
 
-                    # Embed.
+                    # Embed via BatchEmbedder: validates vector count and
+                    # dimension per batch and raises BackendError on any
+                    # mismatch, which fails this source (see except below) rather
+                    # than silently promoting chunks with missing embeddings.
                     self._emit({
                         "stage": "embed", "status": "start",
                         "uri": uri, "count": len(all_chunks),
                     })
-                    texts = [c.text for c in all_chunks]
-                    if texts:
-                        vectors = self._embedder.embed(texts)
-                    else:
-                        vectors = []
                     embed_pairs = [
-                        (str(c.id), vec)
-                        for c, vec in zip(all_chunks, vectors, strict=False)
+                        (str(chunk.id), vec)
+                        for chunk, vec in batch_embedder.embed_chunks(all_chunks)
                     ]
                     self._emit({"stage": "embed", "status": "end", "uri": uri})
 
@@ -397,6 +425,9 @@ class SyncEngine:
                     if outcome.promoted:
                         sources_changed += 1
                         chunks_added += outcome.chunks_written
+                        # Chunks retired from the previous revision this
+                        # promotion superseded count as deletions.
+                        chunks_deleted += outcome.chunks_retired
                         for warn in outcome.validation.warnings:
                             warnings.append(f"{uri}: {warn}")
                     else:
@@ -419,7 +450,7 @@ class SyncEngine:
                         corpus_id=corpus_id, canonical_uri=uri
                     )
                     if active_rev is not None:
-                        self._store.retire_revision(
+                        chunks_deleted += self._store.retire_revision(
                             corpus_id=corpus_id, revision_id=active_rev
                         )
                         sources_changed += 1
@@ -501,23 +532,23 @@ def derive_corpus_health(store: Store, corpus_id: CorpusId) -> CorpusHealth:
 
     Returns:
         CorpusHealth enum value.
+
+    Raises:
+        BackendError: If the store cannot be queried.  A broken store is a real
+            failure the caller must see - health derivation must not mask it by
+            reporting a healthy or empty corpus.
     """
     # Fetch latest build run first (determines BUILDING and FAILED states).
-    latest_run: dict[str, Any] | None = None
-    try:
-        latest_run = store.get_latest_build_run(corpus_id=corpus_id)
-    except Exception:
-        latest_run = None
+    # A BackendError here propagates: a store that cannot answer is a fault the
+    # caller must surface, not silently coerce to EMPTY.
+    latest_run: dict[str, Any] | None = store.get_latest_build_run(corpus_id=corpus_id)
 
     # BUILDING: in-progress build run - highest precedence.
     if latest_run is not None and latest_run.get("status") == "running":
         return CorpusHealth.BUILDING
 
     # Check active revisions (determines READY vs FAILED/EMPTY).
-    try:
-        active_uris = store.list_active_canonical_uris(corpus_id=corpus_id)
-    except Exception:
-        active_uris = []
+    active_uris = store.list_active_canonical_uris(corpus_id=corpus_id)
 
     has_active_revision = len(active_uris) > 0
 

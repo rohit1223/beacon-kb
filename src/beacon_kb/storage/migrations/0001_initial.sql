@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     model_name      TEXT    NOT NULL,
     dimension       INTEGER NOT NULL,
     similarity      TEXT    NOT NULL,  -- 'cosine', 'dot', 'euclidean'
-    vector_blob     BLOB    NOT NULL,  -- numpy float32 array serialised with tobytes()
+    vector_blob     BLOB    NOT NULL,  -- little-endian float32 array packed with struct.pack('<Nf', ...)
     active          INTEGER NOT NULL DEFAULT 0,  -- mirrors chunk visibility
     created_at      TEXT    NOT NULL,
     PRIMARY KEY (chunk_id)

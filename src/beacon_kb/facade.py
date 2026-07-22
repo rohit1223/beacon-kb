@@ -181,8 +181,20 @@ class KnowledgeBase:
 
         corpus_name: str = self._config.core.corpus_name
 
-        # Derive chunker params from config for fingerprinting.
-        chunker_params: dict[str, Any] = {}
+        # Chunker configuration must flow into BOTH the pipeline fingerprint
+        # and the constructed chunker so they never disagree.  Passing empty
+        # chunker_params (or omitting the parser version) would neuter
+        # fingerprint invalidation: a chunker/parser change would not force
+        # re-ingestion.  These are the real HeadingAwareChunker defaults.
+        chunker_max_tokens = 512
+        chunker_overlap_tokens = 64
+        chunker_params: dict[str, Any] = {
+            "chunker": "heading_aware",
+            "max_tokens": chunker_max_tokens,
+            "overlap_tokens": chunker_overlap_tokens,
+        }
+        # Parser-derived version so a parser swap changes the fingerprint.
+        parser_version = f"{type(parser).__name__}"
 
         def chunker_factory(
             corpus: str,
@@ -195,6 +207,8 @@ class KnowledgeBase:
                 canonical_uri=canonical_uri,
                 revision_id=revision_id,
                 pipeline_fingerprint=pipeline_fingerprint,
+                max_tokens=chunker_max_tokens,
+                overlap_tokens=chunker_overlap_tokens,
             )
 
         engine = SyncEngine(
@@ -207,6 +221,7 @@ class KnowledgeBase:
             observer=self._observer,
             corpus_name=corpus_name,
             chunker_params=chunker_params,
+            parser_version=parser_version,
         )
 
         corpus_id = CorpusId(corpus_name)

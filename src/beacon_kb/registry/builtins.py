@@ -26,15 +26,21 @@ def _register_builtins() -> None:
         instance=HeuristicTokenCounter(),
     )
 
-    # STORES: SQLiteStore is the built-in default store.
-    # Import is deferred to avoid circular imports at module load time.
-    from beacon_kb.storage.sqlite import SQLiteStore
-
-    precedence.register_builtin(
-        group=groups.STORES,
-        name="sqlite",
-        instance=SQLiteStore(db_path=":memory:", vector_dim=16),
-    )
+    # STORES: no built-in default is registered.
+    # A store cannot be constructed without a concrete db_path and vector_dim.
+    # Registering a throwaway ``:memory:`` / 16-dim SQLiteStore here would mint
+    # a live instance that, if resolved, silently reads/writes an isolated
+    # in-memory database with the wrong dimension - a footgun.  We leave the
+    # group empty so resolve() raises PluginNotFound (its message lists the
+    # installed names).  Callers construct and register a store explicitly:
+    #
+    #   from beacon_kb.storage.sqlite import SQLiteStore
+    #   from beacon_kb.registry import precedence, groups
+    #   precedence.register(
+    #       group=groups.STORES,
+    #       name="sqlite",
+    #       instance=SQLiteStore(db_path="/path/to/kb.db", vector_dim=768),
+    #   )
 
     # CONNECTORS: Register first-party connectors.
     # Import is deferred to avoid circular imports at module load time.
@@ -59,26 +65,23 @@ def _register_builtins() -> None:
     #       instance=FilesystemConnector(root=..., corpus=..., patterns=[...]),
     #   )
 
-    # CHUNKERS: HeadingAwareChunker is the built-in default chunker.
-    # The default instance is registered with sentinel identity values so the
-    # 'heading_aware' name is discoverable via resolve(); production callers
-    # always construct their own HeadingAwareChunker with the live corpus,
-    # canonical URI, revision, and pipeline fingerprint for their build run.
-    # Import is deferred to avoid circular imports at module load time.
-    from beacon_kb.ingestion.chunking import HeadingAwareChunker
-
-    precedence.register_builtin(
-        group=groups.CHUNKERS,
-        name="heading_aware",
-        instance=HeadingAwareChunker(
-            corpus="__default__",
-            canonical_uri="__default__",
-            revision_id="__default__",
-            pipeline_fingerprint="__default__",
-            max_tokens=512,
-            overlap_tokens=64,
-        ),
-    )
+    # CHUNKERS: no built-in default is registered.
+    # A HeadingAwareChunker is bound to a specific corpus, canonical URI,
+    # revision, and pipeline fingerprint at construction.  Registering a
+    # ``__default__``-identity instance here would mint chunks with bogus
+    # identity if it were ever resolved.  We leave the group empty so resolve()
+    # raises PluginNotFound; the sync pipeline builds a fresh chunker per source
+    # via its chunker_factory.  Callers that need registry resolution construct
+    # and register their own instance explicitly:
+    #
+    #   from beacon_kb.ingestion.chunking import HeadingAwareChunker
+    #   from beacon_kb.registry import precedence, groups
+    #   precedence.register(
+    #       group=groups.CHUNKERS,
+    #       name="heading_aware",
+    #       instance=HeadingAwareChunker(corpus=..., canonical_uri=...,
+    #                                    revision_id=..., pipeline_fingerprint=...),
+    #   )
 
     # PARSERS: MarkdownParser is the built-in default parser.
     # Import is deferred to avoid circular imports at module load time.

@@ -144,6 +144,20 @@ class FilesystemConnector:
             raise IngestionError(
                 f"FilesystemConnector.fetch: path is not a file for URI {uri!r}"
             )
+        # Reject non-text media types BEFORE reading the file: resolve_media_type
+        # needs only the URI, so there is no reason to read (potentially large)
+        # binary bytes we will immediately reject.  Binary types
+        # (application/octet-stream, application/pdf, image/*, etc.) are not
+        # decodable as text and must fail with a clear error rather than being
+        # silently mangled by an errors="replace" fallback.
+        media_type = resolve_media_type(uri)
+        if not is_text_media_type(media_type):
+            raise IngestionError(
+                f"FilesystemConnector.fetch: binary or non-text media type "
+                f"{media_type!r} for URI {uri!r}; text decoding is not supported "
+                f"for this file type."
+            )
+
         try:
             raw_bytes = path.read_bytes()
         except OSError as exc:
@@ -151,17 +165,6 @@ class FilesystemConnector:
                 f"FilesystemConnector.fetch: cannot read file for URI {uri!r}: {exc}"
             ) from exc
 
-        media_type = resolve_media_type(uri)
-        # Only attempt text decoding for recognised text/* media types.
-        # Binary types (application/octet-stream, application/pdf, image/*, etc.)
-        # are not decodable as text and must be rejected with a clear error rather
-        # than silently mangled by an errors="replace" fallback.
-        if not is_text_media_type(media_type):
-            raise IngestionError(
-                f"FilesystemConnector.fetch: binary or non-text media type "
-                f"{media_type!r} for URI {uri!r}; text decoding is not supported "
-                f"for this file type."
-            )
         try:
             content = raw_bytes.decode(self._encoding, errors="strict")
         except (UnicodeDecodeError, LookupError) as exc:
