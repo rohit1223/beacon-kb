@@ -114,10 +114,12 @@ select = [
 ]
 ignore = [
     "S101",   # use of assert (needed in tests)
+    "N818",   # Exception names PluginConflict/PluginNotFound/ProtocolMismatch are part of the public API contract
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S"]
+"src/beacon_kb/protocols.py" = ["ANN401"]  # Any is intentional in StopCondition/Tool/ProgressObserver protocol params that accept opaque objects
 
 [tool.mypy]
 python_version = "3.11"
