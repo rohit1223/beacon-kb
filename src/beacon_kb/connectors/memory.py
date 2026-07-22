@@ -20,6 +20,7 @@ import hashlib
 from typing import ClassVar
 
 from beacon_kb.errors import IngestionError
+from beacon_kb.ingestion.identity import PROVISIONAL_FINGERPRINT
 from beacon_kb.ingestion.media import resolve_media_type
 from beacon_kb.models import (
     RawDocument,
@@ -28,7 +29,7 @@ from beacon_kb.models import (
     make_source_id,
 )
 
-_DEFAULT_PIPELINE_FINGERPRINT: str = "v1"
+_DEFAULT_PIPELINE_FINGERPRINT: str = PROVISIONAL_FINGERPRINT
 
 
 class MemoryConnector:
@@ -41,6 +42,11 @@ class MemoryConnector:
         pipeline_fingerprint: Stable string identifying the active pipeline
             configuration.  Used in :class:`~beacon_kb.models.RevisionId`
             construction.
+            Defaults to :data:`~beacon_kb.ingestion.identity.PROVISIONAL_FINGERPRINT`
+            (``"unpinned"``).  The revision_id produced is a *provisional*
+            content identity - it captures the content hash but not the full
+            pipeline fingerprint.  The sync pipeline re-derives the
+            authoritative revision_id with the real pipeline fingerprint.
 
     The connector is deterministic: identical inputs always produce identical
     IDs and document records across processes.

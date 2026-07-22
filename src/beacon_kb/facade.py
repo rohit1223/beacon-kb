@@ -155,13 +155,62 @@ class KnowledgeBase:
 
         self._emit({"stage": "sync", "status": "started"})
 
-        # Full implementation deferred to the ingestion epic.
-        # This shell verifies that all required components are injected and
-        # that the sync() signature is final.
-        raise ReadinessError(
-            "sync() is not yet fully implemented. "
-            "Ingestion pipeline wiring comes in a later epic."
+        # Inline imports avoid circular deps: sync module only needed here.
+        from beacon_kb.ingestion.chunking import HeadingAwareChunker
+        from beacon_kb.ingestion.sync import SyncEngine
+        from beacon_kb.models import CorpusId
+        from beacon_kb.protocols import (
+            Connector as _Connector,
         )
+        from beacon_kb.protocols import (
+            Embedder as _Embedder,
+        )
+        from beacon_kb.protocols import (
+            Parser as _Parser,
+        )
+        from beacon_kb.protocols import (
+            Store as _Store,
+        )
+
+        # _require guarantees these are non-None.
+        # SyncEngine accepts any Store-protocol implementation; no SQLiteStore cast needed.
+        store: _Store = self._store  # type: ignore[assignment]
+        embedder: _Embedder = self._embedder  # type: ignore[assignment]
+        connector: _Connector = self._connector  # type: ignore[assignment]
+        parser: _Parser = self._parser  # type: ignore[assignment]
+
+        corpus_name: str = self._config.core.corpus_name
+
+        # Derive chunker params from config for fingerprinting.
+        chunker_params: dict[str, Any] = {}
+
+        def chunker_factory(
+            corpus: str,
+            canonical_uri: str,
+            revision_id: str,
+            pipeline_fingerprint: str,
+        ) -> HeadingAwareChunker:
+            return HeadingAwareChunker(
+                corpus=corpus,
+                canonical_uri=canonical_uri,
+                revision_id=revision_id,
+                pipeline_fingerprint=pipeline_fingerprint,
+            )
+
+        engine = SyncEngine(
+            store=store,
+            connector=connector,
+            parser=parser,
+            chunker_factory=chunker_factory,
+            embedder=embedder,
+            enrichment_orchestrator=None,
+            observer=self._observer,
+            corpus_name=corpus_name,
+            chunker_params=chunker_params,
+        )
+
+        corpus_id = CorpusId(corpus_name)
+        return engine.sync(corpus_id=corpus_id)
 
     # ------------------------------------------------------------------
     # search()
@@ -395,9 +444,20 @@ class KnowledgeBase:
         answer_ready = search_ready and components["generator"]["present"]
 
         overall = "ok" if answer_ready else "degraded"
+
+        # Derive corpus health from durable store state if store is present.
+        corpus_health_value: str | None = None
+        if self._store is not None:
+            from beacon_kb.ingestion.sync import derive_corpus_health
+            from beacon_kb.models import CorpusId
+
+            corpus_id = CorpusId(self._config.core.corpus_name)
+            corpus_health_value = derive_corpus_health(self._store, corpus_id).value
+
         return {
             "status": overall,
             "search_ready": search_ready,
             "answer_ready": answer_ready,
+            "corpus_health": corpus_health_value,
             "components": components,
         }

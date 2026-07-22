@@ -607,6 +607,37 @@ class ConnectorContract(abc.ABC):
         else:
             raise AssertionError("Expected IngestionError but no exception was raised")
 
+    def test_revision_id_is_content_sensitive_and_provisional(self) -> None:
+        """Connector-supplied revision IDs are content-sensitive but provisional.
+
+        Connector contract:
+        - Changing content must produce a different revision_id (content-sensitive).
+        - The revision_id is PROVISIONAL: it uses the connector's default
+          pipeline_fingerprint sentinel, NOT the full pipeline fingerprint.
+        - The sync pipeline MUST re-derive the authoritative revision_id with
+          the real pipeline fingerprint before staging or promoting any revision.
+
+        This test verifies the first property (content-sensitivity) using a
+        connector that supports two different documents.  Pipelines MUST NOT
+        treat connector-supplied revision IDs as final authoritative identifiers.
+        """
+        subject = self.make_subject()
+        sources = subject.list_sources()
+        if len(sources) < 2:
+            # Cannot compare revision IDs for different content with fewer than 2 sources.
+            return
+        doc1 = subject.fetch(sources[0])
+        doc2 = subject.fetch(sources[1])
+        if doc1.content == doc2.content:
+            # Cannot assert content-sensitivity when both sources have identical content.
+            return
+        assert doc1.revision_id != doc2.revision_id, (
+            "ConnectorContract: different content must produce different revision_id values "
+            "(content-sensitive identity). "
+            "Note: these revision_ids are PROVISIONAL - the sync pipeline re-derives the "
+            "authoritative revision_id with the real pipeline fingerprint."
+        )
+
 
 class EmbedderContract(abc.ABC):
     """Reusable contract-test suite for Embedder implementations."""
@@ -1495,6 +1526,209 @@ class StoreContract:
     def test_delete_empty_list_is_noop(self) -> None:
         subject = self.make_subject()
         subject.delete_chunks([])  # Must not raise
+
+    def test_stage_and_promote_revision(self) -> None:
+        """Staged chunks are invisible until promote_revision() is called."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://staged-doc"
+        content_hash = "abc123"
+        pipeline_fp = "test-fp-v1"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        # Stage: chunk must not be visible yet.
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+        assert subject.get_chunk(str(chunk.id)) is None, (
+            "StoreContract: staged chunk must not be visible before promote_revision()."
+        )
+
+        # Promote: chunk must become visible.
+        subject.promote_revision(corpus_id=corpus_id, revision_id=revision_id)
+        found = subject.get_chunk(str(chunk.id))
+        assert found is not None, (
+            "StoreContract: chunk must be visible after promote_revision()."
+        )
+        assert found.id == chunk.id
+
+    def test_rollback_revision_cleans_up_staged_chunks(self) -> None:
+        """rollback_revision() removes all staged chunks and the revision record."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://rollback-doc"
+        content_hash = "deadbeef"
+        pipeline_fp = "test-fp-v2"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+
+        # Rollback: staged chunk must be removed.
+        subject.rollback_revision(corpus_id=corpus_id, revision_id=revision_id)
+        assert subject.get_chunk(str(chunk.id)) is None, (
+            "StoreContract: rolled-back chunk must not be visible after rollback_revision()."
+        )
+
+    def test_get_staged_chunks_returns_staged_only(self) -> None:
+        """get_staged_chunks() returns chunks with active=0 for the revision."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://staged-read-doc"
+        content_hash = "feedcafe"
+        pipeline_fp = "test-fp-v3"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+
+        staged = subject.get_staged_chunks(corpus_id=corpus_id, revision_id=revision_id)
+        assert len(staged) == 1, (
+            f"StoreContract: get_staged_chunks() must return the staged chunk. Got {len(staged)}."
+        )
+        assert staged[0].id == chunk.id
+
+    def test_get_latest_build_run_none_when_no_runs(self) -> None:
+        """get_latest_build_run() returns None when no build runs exist for the corpus."""
+        from beacon_kb.models import CorpusId
+
+        subject = self.make_subject()
+        result = subject.get_latest_build_run(corpus_id=CorpusId("nonexistent-corpus-xyz"))
+        assert result is None, (
+            "StoreContract: get_latest_build_run() must return None for a corpus with no runs."
+        )
+
+    def test_get_latest_build_run_returns_most_recent(self) -> None:
+        """get_latest_build_run() returns the most recent build run for the corpus."""
+        from beacon_kb.models import CorpusId
+
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-build-run-corpus")
+
+        import datetime
+
+        t1 = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.UTC).isoformat()
+        t2 = datetime.datetime(2024, 1, 2, 0, 0, 0, tzinfo=datetime.UTC).isoformat()
+
+        subject.create_build_run(
+            corpus_id=corpus_id, pipeline_fingerprint="fp1", started_at_iso=t1
+        )
+        run2_id = subject.create_build_run(
+            corpus_id=corpus_id, pipeline_fingerprint="fp2", started_at_iso=t2
+        )
+
+        latest = subject.get_latest_build_run(corpus_id=corpus_id)
+        assert latest is not None, (
+            "StoreContract: get_latest_build_run() must return a run when runs exist."
+        )
+        assert latest["build_run_id"] == run2_id, (
+            f"StoreContract: get_latest_build_run() must return the most recent run "
+            f"(by started_at_iso). Expected {run2_id!r}, got {latest['build_run_id']!r}."
+        )
+
+    def test_get_latest_build_run_reflects_status(self) -> None:
+        """get_latest_build_run() returns the correct status field."""
+        import datetime
+
+        from beacon_kb.models import CorpusId
+
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-status-corpus")
+        t1 = datetime.datetime(2024, 6, 1, 0, 0, 0, tzinfo=datetime.UTC).isoformat()
+
+        run_id = subject.create_build_run(
+            corpus_id=corpus_id, pipeline_fingerprint="fp-status", started_at_iso=t1
+        )
+        # Newly created runs have status 'running'.
+        latest = subject.get_latest_build_run(corpus_id=corpus_id)
+        assert latest is not None
+        assert latest["status"] == "running", (
+            f"StoreContract: newly created build run must have status='running'. "
+            f"Got {latest['status']!r}."
+        )
+
+        # After finishing, the status should update.
+        subject.finish_build_run(build_run_id=run_id, status="failed")
+        latest_after = subject.get_latest_build_run(corpus_id=corpus_id)
+        assert latest_after is not None
+        assert latest_after["status"] == "failed", (
+            f"StoreContract: get_latest_build_run() must reflect finished status. "
+            f"Got {latest_after['status']!r}."
+        )
 
 
 # ---------------------------------------------------------------------------

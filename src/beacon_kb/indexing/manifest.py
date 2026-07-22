@@ -18,14 +18,11 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from beacon_kb.errors import BackendError
 from beacon_kb.models import CorpusId, IngestionChange, RevisionId
-
-if TYPE_CHECKING:
-    from beacon_kb.storage.sqlite import SQLiteStore
-
+from beacon_kb.protocols import Store
 
 # ---------------------------------------------------------------------------
 # Fingerprint helpers
@@ -111,7 +108,7 @@ class IndexManifest:
         store: Open SQLiteStore instance to read manifest state from.
     """
 
-    def __init__(self, store: SQLiteStore) -> None:
+    def __init__(self, store: Store) -> None:
         self._store = store
 
     def revision_status(
