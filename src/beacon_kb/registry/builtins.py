@@ -36,5 +36,28 @@ def _register_builtins() -> None:
         instance=SQLiteStore(db_path=":memory:", vector_dim=16),
     )
 
+    # CONNECTORS: Register first-party connectors.
+    # Import is deferred to avoid circular imports at module load time.
+    from beacon_kb.connectors.memory import MemoryConnector
+
+    precedence.register_builtin(
+        group=groups.CONNECTORS,
+        name="memory",
+        instance=MemoryConnector(),
+    )
+    # FilesystemConnector is NOT registered as a built-in default.
+    # It requires caller-supplied root directory, corpus name, and glob
+    # patterns at construction time; a default instance would bind to the
+    # process CWD at import time and silently produce CWD-sensitive results.
+    # Callers must construct and register a FilesystemConnector explicitly:
+    #
+    #   from beacon_kb.connectors.filesystem import FilesystemConnector
+    #   from beacon_kb.registry import precedence, groups
+    #   precedence.register(
+    #       group=groups.CONNECTORS,
+    #       name="filesystem",
+    #       instance=FilesystemConnector(root=..., corpus=..., patterns=[...]),
+    #   )
+
 
 _register_builtins()
