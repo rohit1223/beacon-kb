@@ -135,7 +135,12 @@ ignore = [
 "src/beacon_kb/registry/groups.py" = ["S105"]  # S105 false-positive: TOKEN_COUNTERS is a group name string, not a password
 
 [tool.mypy]
-python_version = "3.11"
+# No python_version pin: mypy checks against the running interpreter so the
+# type-check target always matches the installed dependency stubs (numpy 2.5.x
+# stubs use PEP 695 syntax and support only Python >=3.12; a 3.11 target would
+# reject them while checking a runtime combination that cannot exist).
+# The 3.11 syntax floor for our own code is enforced by ruff target-version;
+# requires-python stays ">=3.11" per the implementation plan.
 strict = true
 files = ["src"]
 namespace_packages = true

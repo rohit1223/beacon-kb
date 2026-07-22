@@ -5,11 +5,11 @@ All fakes are deterministic under a fixed seed using ``random.Random(seed)``.
 Contract test suites are abstract base classes with a ``make_subject()`` hook
 that subclasses implement to provide the implementation under test.
 
-Note: Contract suites for Parser, Chunker, and Store (``ParserContract``,
-``ChunkerContract``, ``StoreContract``) are intentionally absent from this
-module. Those suites will be added in Epic 02 together with the concrete
-implementations they exercise. Adding skeleton suites here without a real
-implementation to verify them would give false confidence.
+Note: Contract suites for Parser and Chunker (``ParserContract``,
+``ChunkerContract``) are intentionally absent from this module.
+Those suites will be added together with the concrete implementations
+they exercise.
+``StoreContract`` is available in this module.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from beacon_kb.models import (
     AnswerResponse,
     Chunk,
     ChunkId,
+    ChunkKind,
     CorpusId,
     Evidence,
     EvidenceRole,
@@ -35,7 +36,9 @@ from beacon_kb.models import (
     RevisionId,
     SectionId,
     SourceId,
+    make_chunk_id,
     make_evidence_id,
+    make_source_id,
 )
 from beacon_kb.protocols import (
     Connector,
@@ -51,6 +54,7 @@ from beacon_kb.protocols import (
     SessionStore,
     SparseRetriever,
     StopCondition,
+    Store,
     TokenCounter,
     Tool,
 )
@@ -1387,6 +1391,112 @@ class CorpusRouterContract(abc.ABC):
         assert isinstance(result, list)
 
 
+class StoreContract:
+    """Reusable contract-test suite for Store implementations.
+
+    Subclasses must implement ``make_subject()`` to provide a fresh
+    Store instance for each test.
+    """
+
+    def make_subject(self) -> Store:
+        """Return a fresh Store instance for each test."""
+        raise NotImplementedError
+
+    def _make_chunk(
+        self,
+        *,
+        corpus: str = "test-corpus",
+        uri: str = "fake://doc-1",
+        revision_id: str = "rev-001",
+        pipeline: str = "pipe-v1",
+        ordinal: int = 0,
+        text: str = "hello world",
+        section_locator: str = "intro",
+    ) -> Chunk:
+        """Return a minimal Chunk suitable for contract tests."""
+        source_id = make_source_id(corpus=corpus, canonical_uri=uri)
+        chunk_id = make_chunk_id(
+            corpus=corpus,
+            canonical_uri=uri,
+            revision_id=revision_id,
+            pipeline_fingerprint=pipeline,
+            parent_locator=section_locator,
+            child_ordinal=ordinal,
+        )
+        return Chunk(
+            id=chunk_id,
+            source_id=source_id,
+            revision_id=RevisionId(revision_id),
+            section_id=SectionId("sec-001"),
+            text=text,
+            ordinal=ordinal,
+            parent_locator=section_locator,
+            kind=ChunkKind.CHILD,
+            token_count=len(text.split()),
+        )
+
+    def test_is_store_instance(self) -> None:
+        subject = self.make_subject()
+        assert isinstance(subject, Store)
+
+    def test_upsert_chunks_returns_none(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk()
+        result = subject.upsert_chunks([chunk])  # type: ignore[func-returns-value]
+        assert result is None
+
+    def test_get_chunk_after_upsert(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk(text="contract test content")
+        subject.upsert_chunks([chunk])
+        found = subject.get_chunk(str(chunk.id))
+        assert found is not None
+        assert found.id == chunk.id
+
+    def test_get_chunk_missing_returns_none(self) -> None:
+        subject = self.make_subject()
+        result = subject.get_chunk("missing-id-that-does-not-exist")
+        assert result is None
+
+    def test_delete_chunks_by_id(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk(text="to be deleted")
+        subject.upsert_chunks([chunk])
+        subject.delete_chunks([str(chunk.id)])
+        assert subject.get_chunk(str(chunk.id)) is None
+
+    def test_delete_nonexistent_is_idempotent(self) -> None:
+        subject = self.make_subject()
+        subject.delete_chunks(["nonexistent-id"])  # Must not raise
+
+    def test_upsert_multiple_chunks(self) -> None:
+        subject = self.make_subject()
+        chunks = [
+            self._make_chunk(text=f"chunk {i}", ordinal=i)
+            for i in range(5)
+        ]
+        subject.upsert_chunks(chunks)
+        for chunk in chunks:
+            assert subject.get_chunk(str(chunk.id)) is not None
+
+    def test_upsert_chunks_idempotent(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk(text="stable text")
+        subject.upsert_chunks([chunk])
+        subject.upsert_chunks([chunk])  # Second call must not raise or duplicate
+        found = subject.get_chunk(str(chunk.id))
+        assert found is not None
+
+    def test_upsert_empty_list_is_noop(self) -> None:
+        subject = self.make_subject()
+        result = subject.upsert_chunks([])  # type: ignore[func-returns-value]  # Must not raise
+        assert result is None
+
+    def test_delete_empty_list_is_noop(self) -> None:
+        subject = self.make_subject()
+        subject.delete_chunks([])  # Must not raise
+
+
 # ---------------------------------------------------------------------------
 # Convenience re-exports
 # ---------------------------------------------------------------------------
@@ -1422,6 +1532,7 @@ __all__ = [
     "SessionStoreContract",
     "SparseRetrieverContract",
     "StopConditionContract",
+    "StoreContract",
     "TokenCounterContract",
     "ToolContract",
 ]

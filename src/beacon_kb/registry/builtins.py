@@ -26,5 +26,15 @@ def _register_builtins() -> None:
         instance=HeuristicTokenCounter(),
     )
 
+    # STORES: SQLiteStore is the built-in default store.
+    # Import is deferred to avoid circular imports at module load time.
+    from beacon_kb.storage.sqlite import SQLiteStore
+
+    precedence.register_builtin(
+        group=groups.STORES,
+        name="sqlite",
+        instance=SQLiteStore(db_path=":memory:", vector_dim=16),
+    )
+
 
 _register_builtins()
