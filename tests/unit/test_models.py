@@ -1127,6 +1127,10 @@ class TestPositiveProtocolConformance:
             def dimension(self) -> int:
                 return 1
 
+            @property
+            def batch_size(self) -> int:
+                return 8
+
         instance = MinimalEmbedder()
         assert isinstance(instance, Embedder) is True
 

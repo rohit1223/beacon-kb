@@ -73,9 +73,8 @@ class HeuristicTokenCounter:
     exact counts matter, replace this with a model-specific tokenizer via the
     ``beacon_kb.token_counters`` entry-point group.
 
-    Error contract: raises ``BeaconError`` if *model* is explicitly supplied but
-    the model name is completely unrecognised AND the caller requested strict
-    mode.  In relaxed mode (default), always falls back to the heuristic.
+    Error contract: never raises for an unknown model name.
+    Unknown or empty model names always fall back to the heuristic.
     """
 
     def count_tokens(self, text: str, *, model: str = "") -> int:

@@ -20,6 +20,7 @@ import pytest
 from beacon_kb.errors import PluginConflict, PluginError, PluginNotFound, ProtocolMismatch
 from beacon_kb.protocols import Connector, TokenCounter
 from beacon_kb.registry import discovery, groups, precedence
+from beacon_kb.registry import resolve as registry_resolve
 from beacon_kb.testing import FakeConnector, FakeTokenCounter
 
 # ---------------------------------------------------------------------------
@@ -357,6 +358,45 @@ class TestProtocolMismatch:
             )
         assert exc_info.value.missing_members  # at least one missing member
 
+    def test_auto_protocol_raises_mismatch_without_kwarg(self) -> None:
+        """registry.resolve() raises ProtocolMismatch even when no protocol kwarg is passed.
+
+        The group's canonical protocol is applied automatically via
+        groups.get_protocol_for_group(), so callers get the same guarantee
+        whether or not they supply the protocol argument explicitly.
+        """
+
+        class NotAConnector:
+            """Object that does not implement Connector."""
+            pass
+
+        precedence.register(
+            group=groups.CONNECTORS,
+            name="non-conforming",
+            instance=NotAConnector(),
+        )
+        # Note: no protocol= kwarg - the registry facade should infer Connector.
+        with pytest.raises(ProtocolMismatch) as exc_info:
+            registry_resolve(group=groups.CONNECTORS, name="non-conforming")
+        err = exc_info.value
+        assert err.group == groups.CONNECTORS
+        assert err.name == "non-conforming"
+
+    def test_auto_protocol_conforming_object_passes(self) -> None:
+        """A conforming object resolves successfully without an explicit protocol kwarg."""
+        conn = FakeConnector()
+        precedence.register(group=groups.CONNECTORS, name="good-conn-auto", instance=conn)
+        resolved = registry_resolve(group=groups.CONNECTORS, name="good-conn-auto")
+        assert resolved is conn
+
+    def test_auto_protocol_builtin_token_counter_passes(self) -> None:
+        """The built-in HeuristicTokenCounter satisfies the TokenCounter protocol automatically."""
+        from beacon_kb.tokens import HeuristicTokenCounter
+        tc = HeuristicTokenCounter()
+        precedence.register_builtin(group=groups.TOKEN_COUNTERS, name="heuristic", instance=tc)
+        resolved = registry_resolve(group=groups.TOKEN_COUNTERS)
+        assert resolved is tc
+
 
 # ---------------------------------------------------------------------------
 # Capability rejection
@@ -457,6 +497,25 @@ class TestCapabilityRejection:
         precedence.register(group=groups.CONNECTORS, name="bad-ver", instance=BadVersion())
         with pytest.raises(PluginError):
             precedence.resolve(group=groups.CONNECTORS, name="bad-ver")
+
+    def test_plugin_with_future_api_version_rejected(self) -> None:
+        """A plugin declaring a future plugin_api_version (e.g. 2) is rejected.
+
+        The check is now strict equality: any version != PLUGIN_API_VERSION is
+        refused to avoid silent compatibility assumptions in both directions.
+        """
+        from beacon_kb.version import PLUGIN_API_VERSION
+
+        class FuturePlugin:
+            plugin_api_version: int = PLUGIN_API_VERSION + 1
+
+        precedence.register(
+            group=groups.CONNECTORS, name="future-plugin", instance=FuturePlugin()
+        )
+        with pytest.raises(PluginError) as exc_info:
+            precedence.resolve(group=groups.CONNECTORS, name="future-plugin")
+        assert "plugin_api_version" in str(exc_info.value)
+        assert "incompatible" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

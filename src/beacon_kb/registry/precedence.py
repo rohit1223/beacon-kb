@@ -136,7 +136,8 @@ def _validate_capability(group: str, name: str, instance: Any) -> None:
 
     Validates:
     - ``plugin_api_version`` attribute against ``PLUGIN_API_VERSION``.
-      A plugin that declares a *lower major version* is rejected.
+      A plugin that declares any version other than the current API version is
+      rejected (both lower and higher versions are incompatible).
     - Any other capability metadata checks can be layered here in later epics.
 
     Args:
@@ -154,10 +155,11 @@ def _validate_capability(group: str, name: str, instance: Any) -> None:
                 f"Plugin '{name}' in group '{group}' declared plugin_api_version="
                 f"{declared_version!r} which is not an integer."
             )
-        if declared_version < PLUGIN_API_VERSION:
+        if declared_version != PLUGIN_API_VERSION:
             raise PluginError(
-                f"Plugin '{name}' in group '{group}' targets plugin_api_version="
-                f"{declared_version} but beacon-kb requires >= {PLUGIN_API_VERSION}. "
+                f"Plugin '{name}' in group '{group}' targets an incompatible plugin "
+                f"API line: declared plugin_api_version={declared_version} but "
+                f"beacon-kb requires plugin_api_version={PLUGIN_API_VERSION}. "
                 f"Update or uninstall the plugin."
             )
 

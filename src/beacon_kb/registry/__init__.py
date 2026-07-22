@@ -49,10 +49,19 @@ def resolve(
       3. Sole entry-point default (no name requested, one entry point installed).
       4. Built-in default for the group.
 
+    When *protocol* is not supplied, the group's canonical protocol is looked
+    up via ``groups.get_protocol_for_group()`` and used automatically.
+    This guarantees that ProtocolMismatch is raised for any resolved object
+    that does not satisfy the group's contract, regardless of whether the
+    caller explicitly passes a protocol.
+    Callers that need to skip protocol validation should pass ``protocol=None``
+    and suppress the automatic lookup by using ``precedence.resolve()`` directly.
+
     Args:
         group:        Entry-point group (use ``groups.*`` constants).
         name:         Requested plugin name.  ``None`` means "use default".
         protocol:     Optional runtime_checkable Protocol to validate the result.
+                      When omitted, the group's canonical protocol is used.
         capabilities: Optional mapping of capability name to the config-required
                       value (e.g. ``{"dimension": 768}``); conflicting plugins
                       are rejected with a typed ``PluginError`` before use.
@@ -64,12 +73,16 @@ def resolve(
         PluginConflict:    Two plugins share the same name in this group.
         PluginNotFound:    Requested name is not installed / registered;
                            the error lists the group and installed names.
-        ProtocolMismatch:  Resolved object does not satisfy *protocol*.
+        ProtocolMismatch:  Resolved object does not satisfy the group protocol
+                           (or the explicitly supplied *protocol*).
         PluginError:       Incompatible plugin_api_version or a declared
                            capability that conflicts with configuration.
     """
+    effective_protocol: type | None = protocol
+    if effective_protocol is None:
+        effective_protocol = groups.get_protocol_for_group(group)
     return precedence.resolve(
-        group=group, name=name, protocol=protocol, capabilities=capabilities
+        group=group, name=name, protocol=effective_protocol, capabilities=capabilities
     )
 
 

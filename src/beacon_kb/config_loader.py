@@ -24,6 +24,7 @@ import dataclasses as _dc
 import os
 import pathlib
 import tomllib
+from collections.abc import Mapping
 from typing import Any
 
 from beacon_kb.config import (
@@ -190,7 +191,7 @@ _SECTION_FIELDS: dict[str, list[str]] = {
 
 def _extract_env_overlay(
     defaults_raw: dict[str, Any],
-    environ: dict[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build an env-var overlay dict by scanning known BEACON_* variables.
 
@@ -212,7 +213,7 @@ def _extract_env_overlay(
     Raises:
         ConfigError: If an env-var value cannot be coerced to the expected type.
     """
-    env: dict[str, str] | os._Environ[str] = environ if environ is not None else os.environ
+    env: Mapping[str, str] = environ if environ is not None else os.environ
     overlay: dict[str, Any] = {}
     for section, fields in _SECTION_FIELDS.items():
         section_defaults = defaults_raw.get(section, {})
@@ -273,7 +274,7 @@ def _defaults_as_raw() -> dict[str, Any]:
 def load_config(
     path: str | pathlib.Path | None = None,
     *,
-    environ: dict[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> BeaconConfig:
     """Load and return a validated BeaconConfig using the three-layer merge.
 
@@ -289,7 +290,7 @@ def load_config(
     Args:
         path:    Path to the ``beacon-kb.toml`` config file.  If None, only
                  defaults and env overlay are used.
-        environ: Optional env-var dict override (for testing).  If None the
+        environ: Optional env-var mapping override (for testing).  If None the
                  real ``os.environ`` is used.
 
     Returns:
@@ -333,7 +334,7 @@ def load_config(
 def load_config_or_default(
     path: str | pathlib.Path | None = None,
     *,
-    environ: dict[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> BeaconConfig:
     """Like :func:`load_config` but returns defaults if the file does not exist.
 
@@ -342,7 +343,7 @@ def load_config_or_default(
 
     Args:
         path:    Path to the ``beacon-kb.toml`` file (may be absent).
-        environ: Optional env-var dict override (for testing).
+        environ: Optional env-var mapping override (for testing).
 
     Returns:
         Validated BeaconConfig (possibly all defaults).

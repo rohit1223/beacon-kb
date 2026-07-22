@@ -155,6 +155,17 @@ class Embedder(Protocol):
         """
         ...
 
+    @property
+    def batch_size(self) -> int:
+        """Return the provider-owned batch size hint.
+
+        Batching strategy belongs to the embedding provider.
+        Core pipeline code must read this attribute rather than hardcoding a
+        batch size constant.
+        Implementations should return a positive integer.
+        """
+        ...
+
 
 @runtime_checkable
 class Store(Protocol):
@@ -321,8 +332,11 @@ class Generator(Protocol):
     Score direction: N/A - generators produce text and evidence, not ranked scores.
     Error contract: generate() raises BackendError on provider failure.
     Abstention contract: if evidence is insufficient, set abstained=True in
-    AnswerResponse rather than hallucinating; raise CitationError only if
-    an explicit citation validation step fails.
+    AnswerResponse rather than hallucinating.
+    Abstained responses must carry an empty answer_text string (""); the
+    generator must not synthesize content when it cannot ground the answer
+    in evidence.
+    Raise CitationError only if an explicit citation validation step fails.
     Determinism: generators are generally non-deterministic; callers must not
     assume identical outputs for identical inputs.
 
@@ -365,7 +379,9 @@ class TokenCounter(Protocol):
     """Protocol for token counting utilities.
 
     Score direction: N/A - returns counts, not scores.
-    Error contract: count_tokens() raises BeaconError if the model is unknown.
+    Error contract: count_tokens() never raises for an unknown model name.
+    When the model is unrecognised or empty, the implementation falls back to a
+    heuristic (character-count / chars-per-token).
     Determinism: given identical text and model, count_tokens() is deterministic.
     """
 
@@ -507,8 +523,8 @@ class StopCondition(Protocol):
 
         Args:
             trace: AgenticTrace record capturing the current investigation state.
-                   Typed as Any to avoid a circular dependency at protocol definition time;
-                   implementations should narrow to AgenticTrace.
+                   Typed as Any until the contract suite and fakes exchange real
+                   AgenticTrace values; implementations should narrow to AgenticTrace.
 
         Returns:
             True if the loop should stop; False to continue.

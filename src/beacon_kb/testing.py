@@ -126,9 +126,21 @@ class FakeFailingEmbedder:
     Used to test failure and rollback paths without a real embedding provider.
     """
 
-    def __init__(self, *, dim: int = 16, message: str = "injected failure") -> None:
+    def __init__(
+        self,
+        *,
+        dim: int = 16,
+        batch_size: int = 8,
+        message: str = "injected failure",
+    ) -> None:
         self._dim: int = dim
+        self._batch_size: int = batch_size
         self._message: str = message
+
+    @property
+    def batch_size(self) -> int:
+        """Provider-owned batch size hint."""
+        return self._batch_size
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Always raise BackendError."""
@@ -1094,7 +1106,13 @@ class ToolContract(abc.ABC):
 
 
 class RerankerContract(abc.ABC):
-    """Reusable contract-test suite for Reranker implementations."""
+    """Reusable contract-test suite for Reranker implementations.
+
+    The determinism tests in this suite (e.g. test_rerank_deterministic) assume
+    a deterministically-configured subject such as temperature=0 or a fixed seed.
+    Authors of intentionally non-deterministic implementations may override those
+    specific test methods while keeping all other contract assertions in place.
+    """
 
     @abc.abstractmethod
     def make_subject(self) -> Reranker:
@@ -1155,7 +1173,13 @@ class RerankerContract(abc.ABC):
 
 
 class GeneratorContract(abc.ABC):
-    """Reusable contract-test suite for Generator implementations."""
+    """Reusable contract-test suite for Generator implementations.
+
+    The determinism tests in this suite (e.g. test_generate_deterministic) assume
+    a deterministically-configured subject such as temperature=0 or a fixed seed.
+    Authors of intentionally non-deterministic implementations may override those
+    specific test methods while keeping all other contract assertions in place.
+    """
 
     @abc.abstractmethod
     def make_subject(self) -> Generator:
@@ -1216,7 +1240,13 @@ class GeneratorContract(abc.ABC):
 
 
 class QueryPlannerContract(abc.ABC):
-    """Reusable contract-test suite for QueryPlanner implementations."""
+    """Reusable contract-test suite for QueryPlanner implementations.
+
+    The determinism tests in this suite (e.g. test_plan_deterministic) assume
+    a deterministically-configured subject such as temperature=0 or a fixed seed.
+    Authors of intentionally non-deterministic implementations may override those
+    specific test methods while keeping all other contract assertions in place.
+    """
 
     @abc.abstractmethod
     def make_subject(self) -> QueryPlanner:
@@ -1250,7 +1280,13 @@ class QueryPlannerContract(abc.ABC):
 
 
 class EvidenceGraderContract(abc.ABC):
-    """Reusable contract-test suite for EvidenceGrader implementations."""
+    """Reusable contract-test suite for EvidenceGrader implementations.
+
+    The determinism tests in this suite (e.g. test_grade_deterministic) assume
+    a deterministically-configured subject such as temperature=0 or a fixed seed.
+    Authors of intentionally non-deterministic implementations may override those
+    specific test methods while keeping all other contract assertions in place.
+    """
 
     @abc.abstractmethod
     def make_subject(self) -> EvidenceGrader:
