@@ -59,6 +59,27 @@ def _register_builtins() -> None:
     #       instance=FilesystemConnector(root=..., corpus=..., patterns=[...]),
     #   )
 
+    # CHUNKERS: HeadingAwareChunker is the built-in default chunker.
+    # The default instance is registered with sentinel identity values so the
+    # 'heading_aware' name is discoverable via resolve(); production callers
+    # always construct their own HeadingAwareChunker with the live corpus,
+    # canonical URI, revision, and pipeline fingerprint for their build run.
+    # Import is deferred to avoid circular imports at module load time.
+    from beacon_kb.ingestion.chunking import HeadingAwareChunker
+
+    precedence.register_builtin(
+        group=groups.CHUNKERS,
+        name="heading_aware",
+        instance=HeadingAwareChunker(
+            corpus="__default__",
+            canonical_uri="__default__",
+            revision_id="__default__",
+            pipeline_fingerprint="__default__",
+            max_tokens=512,
+            overlap_tokens=64,
+        ),
+    )
+
     # PARSERS: MarkdownParser is the built-in default parser.
     # Import is deferred to avoid circular imports at module load time.
     from beacon_kb.parsing.markdown import MarkdownParser

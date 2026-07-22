@@ -18,3 +18,5 @@ Each entry records what is missing, why it was deferred, and which epic will add
   Components that require caller-supplied configuration (FilesystemConnector, HtmlParser, PdfParser) cannot register as builtins without a factory or deferred-construction mechanism.
   Until this is added, all configuration-requiring or optional-dependency components must be registered explicitly by the caller after construction.
   This affects the FilesystemConnector, HtmlParser, and PdfParser, all of which document explicit registration as the workaround in ``registry/builtins.py``.
+- Parent-chunk gap: ChunkKind.PARENT records are not materialized; the implicit parent is section_id plus parent_locator carried on every child; Epic 03's context assembly (Task 03.1.3) must treat section_id as parent identity, and parent-level sparse retrieval requires a follow-on task emitting PARENT records to the store.
+- Embedding retry back-off: time.sleep(0.0) in indexing/embedding.py is a placeholder; replace with real exponential back-off once retry policy is finalized (Epic 03).
