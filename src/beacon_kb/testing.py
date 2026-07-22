@@ -5,11 +5,11 @@ All fakes are deterministic under a fixed seed using ``random.Random(seed)``.
 Contract test suites are abstract base classes with a ``make_subject()`` hook
 that subclasses implement to provide the implementation under test.
 
-Note: Contract suites for Parser, Chunker, and Store (``ParserContract``,
-``ChunkerContract``, ``StoreContract``) are intentionally absent from this
-module. Those suites will be added in Epic 02 together with the concrete
-implementations they exercise. Adding skeleton suites here without a real
-implementation to verify them would give false confidence.
+Note: ``ChunkerContract`` was added together with the first concrete
+Chunker implementation (``HeadingAwareChunker``), per the Epic 01 deferral
+note.  A ``ParserContract`` suite remains intentionally absent and will be
+added when a reusable parser contract is needed.
+``StoreContract`` and ``ChunkerContract`` are available in this module.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from beacon_kb.models import (
     AnswerResponse,
     Chunk,
     ChunkId,
+    ChunkKind,
     CorpusId,
     Evidence,
     EvidenceRole,
@@ -35,7 +36,9 @@ from beacon_kb.models import (
     RevisionId,
     SectionId,
     SourceId,
+    make_chunk_id,
     make_evidence_id,
+    make_source_id,
 )
 from beacon_kb.protocols import (
     Connector,
@@ -51,6 +54,7 @@ from beacon_kb.protocols import (
     SessionStore,
     SparseRetriever,
     StopCondition,
+    Store,
     TokenCounter,
     Tool,
 )
@@ -132,15 +136,22 @@ class FakeFailingEmbedder:
         dim: int = 16,
         batch_size: int = 8,
         message: str = "injected failure",
+        model_name: str = "fake-failing-embedder",
     ) -> None:
         self._dim: int = dim
         self._batch_size: int = batch_size
         self._message: str = message
+        self._model_name: str = model_name
 
     @property
     def batch_size(self) -> int:
         """Provider-owned batch size hint."""
         return self._batch_size
+
+    @property
+    def model_name(self) -> str:
+        """Stable model identifier for fingerprinting."""
+        return self._model_name
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Always raise BackendError."""
@@ -214,15 +225,22 @@ class FakeEmbedder:
         dim: int = 16,
         batch_size: int = 8,
         seed: int = _DEFAULT_SEED,
+        model_name: str = "fake-embedder",
     ) -> None:
         self._dim: int = dim
         self._batch_size: int = batch_size
         self._seed: int = seed
+        self._model_name: str = model_name
 
     @property
     def batch_size(self) -> int:
         """Provider-owned batch size hint."""
         return self._batch_size
+
+    @property
+    def model_name(self) -> str:
+        """Stable model identifier for fingerprinting."""
+        return self._model_name
 
     def _embed_one(self, text: str) -> list[float]:
         rng = random.Random(self._seed ^ _text_digest(text))
@@ -603,6 +621,37 @@ class ConnectorContract(abc.ABC):
         else:
             raise AssertionError("Expected IngestionError but no exception was raised")
 
+    def test_revision_id_is_content_sensitive_and_provisional(self) -> None:
+        """Connector-supplied revision IDs are content-sensitive but provisional.
+
+        Connector contract:
+        - Changing content must produce a different revision_id (content-sensitive).
+        - The revision_id is PROVISIONAL: it uses the connector's default
+          pipeline_fingerprint sentinel, NOT the full pipeline fingerprint.
+        - The sync pipeline MUST re-derive the authoritative revision_id with
+          the real pipeline fingerprint before staging or promoting any revision.
+
+        This test verifies the first property (content-sensitivity) using a
+        connector that supports two different documents.  Pipelines MUST NOT
+        treat connector-supplied revision IDs as final authoritative identifiers.
+        """
+        subject = self.make_subject()
+        sources = subject.list_sources()
+        if len(sources) < 2:
+            # Cannot compare revision IDs for different content with fewer than 2 sources.
+            return
+        doc1 = subject.fetch(sources[0])
+        doc2 = subject.fetch(sources[1])
+        if doc1.content == doc2.content:
+            # Cannot assert content-sensitivity when both sources have identical content.
+            return
+        assert doc1.revision_id != doc2.revision_id, (
+            "ConnectorContract: different content must produce different revision_id values "
+            "(content-sensitive identity). "
+            "Note: these revision_ids are PROVISIONAL - the sync pipeline re-derives the "
+            "authoritative revision_id with the real pipeline fingerprint."
+        )
+
 
 class EmbedderContract(abc.ABC):
     """Reusable contract-test suite for Embedder implementations."""
@@ -619,6 +668,19 @@ class EmbedderContract(abc.ABC):
     def test_dimension_positive(self) -> None:
         subject = self.make_subject()
         assert subject.dimension() > 0
+
+    def test_model_name_is_non_empty_string(self) -> None:
+        """Embedder contract: model_name must be a stable, non-empty string.
+
+        The pipeline reads model_name for the fingerprint and stores it with
+        each embedding, so a change of model forces re-ingestion.
+        """
+        subject = self.make_subject()
+        name = subject.model_name
+        assert isinstance(name, str) and name, (
+            "Embedder contract: model_name must be a non-empty string. "
+            f"Got: {name!r}"
+        )
 
     def test_embed_returns_correct_shape(self) -> None:
         subject = self.make_subject()
@@ -1387,11 +1449,394 @@ class CorpusRouterContract(abc.ABC):
         assert isinstance(result, list)
 
 
+class StoreContract:
+    """Reusable contract-test suite for Store implementations.
+
+    Subclasses must implement ``make_subject()`` to provide a fresh
+    Store instance for each test.
+    """
+
+    def make_subject(self) -> Store:
+        """Return a fresh Store instance for each test."""
+        raise NotImplementedError
+
+    def _make_chunk(
+        self,
+        *,
+        corpus: str = "test-corpus",
+        uri: str = "fake://doc-1",
+        revision_id: str = "rev-001",
+        pipeline: str = "pipe-v1",
+        ordinal: int = 0,
+        text: str = "hello world",
+        section_locator: str = "intro",
+    ) -> Chunk:
+        """Return a minimal Chunk suitable for contract tests."""
+        source_id = make_source_id(corpus=corpus, canonical_uri=uri)
+        chunk_id = make_chunk_id(
+            corpus=corpus,
+            canonical_uri=uri,
+            revision_id=revision_id,
+            pipeline_fingerprint=pipeline,
+            parent_locator=section_locator,
+            child_ordinal=ordinal,
+        )
+        return Chunk(
+            id=chunk_id,
+            source_id=source_id,
+            revision_id=RevisionId(revision_id),
+            section_id=SectionId("sec-001"),
+            text=text,
+            ordinal=ordinal,
+            parent_locator=section_locator,
+            kind=ChunkKind.CHILD,
+            token_count=len(text.split()),
+        )
+
+    def test_is_store_instance(self) -> None:
+        subject = self.make_subject()
+        assert isinstance(subject, Store)
+
+    def test_upsert_chunks_returns_none(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk()
+        result = subject.upsert_chunks([chunk])  # type: ignore[func-returns-value]
+        assert result is None
+
+    def test_get_chunk_after_upsert(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk(text="contract test content")
+        subject.upsert_chunks([chunk])
+        found = subject.get_chunk(str(chunk.id))
+        assert found is not None
+        assert found.id == chunk.id
+
+    def test_get_chunk_missing_returns_none(self) -> None:
+        subject = self.make_subject()
+        result = subject.get_chunk("missing-id-that-does-not-exist")
+        assert result is None
+
+    def test_delete_chunks_by_id(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk(text="to be deleted")
+        subject.upsert_chunks([chunk])
+        subject.delete_chunks([str(chunk.id)])
+        assert subject.get_chunk(str(chunk.id)) is None
+
+    def test_delete_nonexistent_is_idempotent(self) -> None:
+        subject = self.make_subject()
+        subject.delete_chunks(["nonexistent-id"])  # Must not raise
+
+    def test_upsert_multiple_chunks(self) -> None:
+        subject = self.make_subject()
+        chunks = [
+            self._make_chunk(text=f"chunk {i}", ordinal=i)
+            for i in range(5)
+        ]
+        subject.upsert_chunks(chunks)
+        for chunk in chunks:
+            assert subject.get_chunk(str(chunk.id)) is not None
+
+    def test_upsert_chunks_idempotent(self) -> None:
+        subject = self.make_subject()
+        chunk = self._make_chunk(text="stable text")
+        subject.upsert_chunks([chunk])
+        subject.upsert_chunks([chunk])  # Second call must not raise or duplicate
+        found = subject.get_chunk(str(chunk.id))
+        assert found is not None
+
+    def test_upsert_empty_list_is_noop(self) -> None:
+        subject = self.make_subject()
+        result = subject.upsert_chunks([])  # type: ignore[func-returns-value]  # Must not raise
+        assert result is None
+
+    def test_delete_empty_list_is_noop(self) -> None:
+        subject = self.make_subject()
+        subject.delete_chunks([])  # Must not raise
+
+    def test_stage_and_promote_revision(self) -> None:
+        """Staged chunks are invisible until promote_revision() is called."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://staged-doc"
+        content_hash = "abc123"
+        pipeline_fp = "test-fp-v1"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        # Stage: chunk must not be visible yet.
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+        assert subject.get_chunk(str(chunk.id)) is None, (
+            "StoreContract: staged chunk must not be visible before promote_revision()."
+        )
+
+        # Promote: chunk must become visible.
+        subject.promote_revision(corpus_id=corpus_id, revision_id=revision_id)
+        found = subject.get_chunk(str(chunk.id))
+        assert found is not None, (
+            "StoreContract: chunk must be visible after promote_revision()."
+        )
+        assert found.id == chunk.id
+
+    def test_rollback_revision_cleans_up_staged_chunks(self) -> None:
+        """rollback_revision() removes all staged chunks and the revision record."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://rollback-doc"
+        content_hash = "deadbeef"
+        pipeline_fp = "test-fp-v2"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+
+        # Rollback: staged chunk must be removed.
+        subject.rollback_revision(corpus_id=corpus_id, revision_id=revision_id)
+        assert subject.get_chunk(str(chunk.id)) is None, (
+            "StoreContract: rolled-back chunk must not be visible after rollback_revision()."
+        )
+
+    def test_get_staged_chunks_returns_staged_only(self) -> None:
+        """get_staged_chunks() returns chunks with active=0 for the revision."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://staged-read-doc"
+        content_hash = "feedcafe"
+        pipeline_fp = "test-fp-v3"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+
+        staged = subject.get_staged_chunks(corpus_id=corpus_id, revision_id=revision_id)
+        assert len(staged) == 1, (
+            f"StoreContract: get_staged_chunks() must return the staged chunk. Got {len(staged)}."
+        )
+        assert staged[0].id == chunk.id
+
+    def test_get_staged_embeddings_and_count(self) -> None:
+        """get_staged_embedding_count/get_staged_embeddings reflect staged embeddings."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://staged-emb-doc"
+        content_hash = "cafed00d"
+        pipeline_fp = "test-fp-emb"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+
+        # No embeddings staged yet.
+        assert subject.get_staged_embedding_count(
+            corpus_id=corpus_id, revision_id=revision_id
+        ) == 0, "StoreContract: staged embedding count must start at 0."
+        assert subject.get_staged_embeddings(
+            corpus_id=corpus_id, revision_id=revision_id
+        ) == [], "StoreContract: get_staged_embeddings() must start empty."
+
+        # Stage one unit-normalized embedding of the store's declared dimension.
+        dim = int(getattr(subject, "_vector_dim", 16))
+        vector = _unit_normalize([1.0] + [0.0] * (dim - 1))
+        subject.upsert_embedding(
+            corpus_id=corpus_id,
+            chunk_id=chunk.id,
+            revision_id=revision_id,
+            vector=vector,
+            model_name="contract-embedder",
+            dimension=dim,
+            similarity="cosine",
+        )
+
+        assert subject.get_staged_embedding_count(
+            corpus_id=corpus_id, revision_id=revision_id
+        ) == 1, "StoreContract: staged embedding count must reflect the staged embedding."
+        staged_embs = subject.get_staged_embeddings(
+            corpus_id=corpus_id, revision_id=revision_id
+        )
+        assert len(staged_embs) == 1, (
+            "StoreContract: get_staged_embeddings() must return the staged embedding."
+        )
+        emb_chunk_id, emb_dim = staged_embs[0]
+        assert emb_chunk_id == str(chunk.id)
+        assert emb_dim == dim, (
+            f"StoreContract: staged embedding dimension must equal {dim}. Got {emb_dim}."
+        )
+
+    def test_get_latest_build_run_none_when_no_runs(self) -> None:
+        """get_latest_build_run() returns None when no build runs exist for the corpus."""
+        from beacon_kb.models import CorpusId
+
+        subject = self.make_subject()
+        result = subject.get_latest_build_run(corpus_id=CorpusId("nonexistent-corpus-xyz"))
+        assert result is None, (
+            "StoreContract: get_latest_build_run() must return None for a corpus with no runs."
+        )
+
+    def test_get_latest_build_run_returns_most_recent(self) -> None:
+        """get_latest_build_run() returns the most recent build run for the corpus."""
+        from beacon_kb.models import CorpusId
+
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-build-run-corpus")
+
+        import datetime
+
+        t1 = datetime.datetime(2024, 1, 1, 0, 0, 0, tzinfo=datetime.UTC).isoformat()
+        t2 = datetime.datetime(2024, 1, 2, 0, 0, 0, tzinfo=datetime.UTC).isoformat()
+
+        subject.create_build_run(
+            corpus_id=corpus_id, pipeline_fingerprint="fp1", started_at_iso=t1
+        )
+        run2_id = subject.create_build_run(
+            corpus_id=corpus_id, pipeline_fingerprint="fp2", started_at_iso=t2
+        )
+
+        latest = subject.get_latest_build_run(corpus_id=corpus_id)
+        assert latest is not None, (
+            "StoreContract: get_latest_build_run() must return a run when runs exist."
+        )
+        assert latest["build_run_id"] == run2_id, (
+            f"StoreContract: get_latest_build_run() must return the most recent run "
+            f"(by started_at_iso). Expected {run2_id!r}, got {latest['build_run_id']!r}."
+        )
+
+    def test_get_latest_build_run_reflects_status(self) -> None:
+        """get_latest_build_run() returns the correct status field."""
+        import datetime
+
+        from beacon_kb.models import CorpusId
+
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-status-corpus")
+        t1 = datetime.datetime(2024, 6, 1, 0, 0, 0, tzinfo=datetime.UTC).isoformat()
+
+        run_id = subject.create_build_run(
+            corpus_id=corpus_id, pipeline_fingerprint="fp-status", started_at_iso=t1
+        )
+        # Newly created runs have status 'running'.
+        latest = subject.get_latest_build_run(corpus_id=corpus_id)
+        assert latest is not None
+        assert latest["status"] == "running", (
+            f"StoreContract: newly created build run must have status='running'. "
+            f"Got {latest['status']!r}."
+        )
+
+        # After finishing, the status should update.
+        subject.finish_build_run(build_run_id=run_id, status="failed")
+        latest_after = subject.get_latest_build_run(corpus_id=corpus_id)
+        assert latest_after is not None
+        assert latest_after["status"] == "failed", (
+            f"StoreContract: get_latest_build_run() must reflect finished status. "
+            f"Got {latest_after['status']!r}."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Convenience re-exports
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "ChunkerContract",
     "ConnectorContract",
     "CorpusRouterContract",
     "DenseRetrieverContract",
@@ -1402,8 +1847,10 @@ __all__ = [
     "FakeCorpusRouter",
     "FakeDenseRetriever",
     "FakeEmbedder",
+    "FakeEnricher",
     "FakeEvidenceGrader",
     "FakeFailingEmbedder",
+    "FakeFailingEnricher",
     "FakeFusion",
     "FakeGenerator",
     "FakeProgressObserver",
@@ -1422,6 +1869,204 @@ __all__ = [
     "SessionStoreContract",
     "SparseRetrieverContract",
     "StopConditionContract",
+    "StoreContract",
     "TokenCounterContract",
     "ToolContract",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Enricher fakes - added in Epic 02.3.1
+# ---------------------------------------------------------------------------
+
+
+class FakeEnricher:
+    """Deterministic Enricher fake that returns pre-configured summaries.
+
+    Used to test enrichment integration without a real LLM.
+    """
+
+    def __init__(
+        self,
+        summaries: dict[str, str] | None = None,
+        *,
+        model_version: str = "fake-v1",
+    ) -> None:
+        self._summaries: dict[str, str] = summaries or {}
+        self.model_version: str = model_version
+        self.calls: list[str] = []
+
+    def enrich(self, text: str, *, prompt: str = "") -> str:
+        """Return a pre-configured summary or echo the text."""
+        self.calls.append(text)
+        return self._summaries.get(text, f"summary:{text[:20]}")
+
+
+class FakeFailingEnricher:
+    """Enricher fake that always raises IngestionError.
+
+    Used to test best-effort failure policy without a real LLM.
+    """
+
+    def __init__(self, *, message: str = "injected enrichment failure") -> None:
+        self._message = message
+        self.calls: int = 0
+
+    def enrich(self, text: str, *, prompt: str = "") -> str:
+        """Always raise IngestionError."""
+        self.calls += 1
+        raise IngestionError(self._message)
+
+
+# ---------------------------------------------------------------------------
+# ChunkerContract - contract test suite for Chunker implementations
+# ---------------------------------------------------------------------------
+
+
+class ChunkerContract(abc.ABC):
+    """Reusable contract-test suite for Chunker implementations.
+
+    Subclasses implement make_subject() to return the Chunker under test.
+    Tests verify: protocol conformance, determinism, content-addressed IDs,
+    real token overlap, fenced-code preservation.
+
+    All tests rely on a 'standard' section produced by _make_section() and
+    a 'fenced code' section produced by _make_fenced_section(). Subclasses
+    may override these to tailor inputs for a specific chunker's configuration.
+    """
+
+    @abc.abstractmethod
+    def make_subject(self) -> Any:
+        """Return a fresh Chunker instance for each test."""
+        ...
+
+    def _make_section(
+        self,
+        *,
+        text: str | None = None,
+        locator: str = "intro",
+        heading: str = "Introduction",
+    ) -> Any:
+        """Return a minimal Section for contract tests.
+
+        Imports Section-related models lazily to avoid circular imports at
+        module load time when testing.py is imported before beacon_kb.models.
+        """
+        from beacon_kb.models import (
+            RevisionId,
+            Section,
+            make_section_id,
+            make_source_id,
+        )
+
+        source_id = make_source_id(corpus="test-corpus", canonical_uri="fake://doc-1")
+        revision_id = RevisionId("rev-contract-test")
+        section_id = make_section_id(
+            source_id=str(source_id),
+            revision_id=str(revision_id),
+            locator=locator,
+        )
+        body = text if text is not None else (
+            "This section has enough content to test chunking behaviour. "
+            "It includes multiple sentences so the chunker can split them into child chunks. "
+            "Each child chunk should share a real token overlap with its neighbours. "
+            "The heading of this section is tracked in the parent locator. "
+            "Lorem ipsum dolor sit amet consectetur adipiscing elit. "
+            "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+        )
+        return Section(
+            id=section_id,
+            source_id=source_id,
+            revision_id=revision_id,
+            locator=locator,
+            heading=heading,
+            text=body,
+            ordinal=0,
+        )
+
+    def _make_fenced_section(self) -> Any:
+        """Return a Section containing a fenced code block."""
+        return self._make_section(
+            text=(
+                "Preamble text before the code block.\n"
+                "```python\n"
+                "def hello():\n"
+                "    return 'world'\n"
+                "```\n"
+                "Postamble text after the code block.\n"
+            ),
+            locator="code-example",
+            heading="Code Example",
+        )
+
+    def test_is_chunker_instance(self) -> None:
+        from beacon_kb.protocols import Chunker
+        subject = self.make_subject()
+        assert isinstance(subject, Chunker)
+
+    def test_chunk_returns_list_of_chunks(self) -> None:
+        from beacon_kb.models import Chunk
+        subject = self.make_subject()
+        section = self._make_section()
+        result = subject.chunk(section)
+        assert isinstance(result, list)
+        assert all(isinstance(c, Chunk) for c in result)
+
+    def test_chunk_deterministic(self) -> None:
+        subject = self.make_subject()
+        section = self._make_section()
+        r1 = subject.chunk(section)
+        r2 = subject.chunk(section)
+        assert [c.id for c in r1] == [c.id for c in r2], (
+            "ChunkerContract: chunk() must be deterministic for identical inputs."
+        )
+
+    def test_chunk_ids_content_addressed(self) -> None:
+        """Chunk IDs must be stable across independent instantiations."""
+        subject1 = self.make_subject()
+        subject2 = self.make_subject()
+        section = self._make_section()
+        r1 = subject1.chunk(section)
+        r2 = subject2.chunk(section)
+        assert [c.id for c in r1] == [c.id for c in r2], (
+            "ChunkerContract: chunk IDs must be identical for identical inputs "
+            "across independent instances (content-addressed, not random)."
+        )
+
+    def test_chunk_produces_child_chunks(self) -> None:
+        from beacon_kb.models import ChunkKind
+        subject = self.make_subject()
+        section = self._make_section()
+        result = subject.chunk(section)
+        child_chunks = [c for c in result if c.kind == ChunkKind.CHILD]
+        assert len(child_chunks) >= 1, (
+            "ChunkerContract: chunk() must produce at least one CHILD chunk."
+        )
+
+    def test_chunk_parent_locator_set(self) -> None:
+        subject = self.make_subject()
+        section = self._make_section(locator="some/path")
+        result = subject.chunk(section)
+        for chunk in result:
+            assert chunk.parent_locator, (
+                "ChunkerContract: all chunks must have parent_locator set to the section locator."
+            )
+
+    def test_empty_section_returns_list(self) -> None:
+        """An empty section body must return an empty list or single empty chunk."""
+        subject = self.make_subject()
+        section = self._make_section(text="")
+        result = subject.chunk(section)
+        assert isinstance(result, list)
+
+    def test_fenced_code_block_preserved(self) -> None:
+        """Fenced code blocks must not be split mid-block."""
+        subject = self.make_subject()
+        section = self._make_fenced_section()
+        result = subject.chunk(section)
+        # No chunk should contain only the opening ``` without the closing ```.
+        for chunk in result:
+            if "```python" in chunk.text:
+                assert "```" in chunk.text[chunk.text.index("```python") + 9:], (
+                    "ChunkerContract: fenced code block must not be split mid-block in any chunk."
+                )

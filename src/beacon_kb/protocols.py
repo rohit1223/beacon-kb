@@ -23,11 +23,14 @@ if TYPE_CHECKING:
     from beacon_kb.models import (
         AnswerResponse,
         Chunk,
+        ChunkId,
         CorpusId,
         Evidence,
         Hit,
         Query,
         RawDocument,
+        Revision,
+        RevisionId,
         Section,
     )
 
@@ -156,6 +159,18 @@ class Embedder(Protocol):
         ...
 
     @property
+    def model_name(self) -> str:
+        """Return a stable identifier for the embedding model.
+
+        Used in the pipeline fingerprint and stored alongside embeddings so a
+        model change triggers re-ingestion.  Implementations should return a
+        stable, non-empty string (e.g. ``'openai/text-embedding-3-small'`` or a
+        fake's canonical name).  Older embedders that predate this property are
+        handled by the pipeline via a documented duck-typed fallback.
+        """
+        ...
+
+    @property
     def batch_size(self) -> int:
         """Return the provider-owned batch size hint.
 
@@ -170,6 +185,11 @@ class Embedder(Protocol):
 @runtime_checkable
 class Store(Protocol):
     """Protocol for chunk storage backends (sparse index + dense vector storage).
+
+    Covers both the basic chunk write/read surface AND the staged promotion
+    lifecycle used by SyncEngine and RevisionCoordinator.  All staged-lifecycle
+    methods (stage_revision, upsert_chunks_to_staging, upsert_embedding,
+    promote_revision, rollback_revision) are part of this contract.
 
     Score direction: N/A - the store does not produce scores directly.
     Error contract: all write methods raise BackendError on failure.
@@ -211,6 +231,398 @@ class Store(Protocol):
 
         Raises:
             BackendError on I/O failure.
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # Staged promotion lifecycle methods
+    # These are required by SyncEngine and RevisionCoordinator.
+    # ------------------------------------------------------------------
+
+    def stage_revision(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision: Revision,
+        canonical_uri: str = "",
+    ) -> None:
+        """Record a revision as staged (invisible to readers until promoted).
+
+        Args:
+            corpus_id:     Corpus namespace for the revision.
+            revision:      Revision record to persist.
+            canonical_uri: Canonical source URI.  When omitted, the string
+                           form of ``revision.source_id`` is used.
+
+        Raises:
+            BackendError on storage failure.
+        """
+        ...
+
+    def upsert_chunks_to_staging(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+        chunks: list[Chunk],
+    ) -> None:
+        """Write chunks to the staging area (active=0, invisible to readers).
+
+        Chunks staged here become visible only after promote_revision() is
+        called for the same revision_id.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision these chunks belong to.
+            chunks:      Chunk records to stage.
+
+        Raises:
+            BackendError on storage failure.
+        """
+        ...
+
+    def upsert_embedding(
+        self,
+        *,
+        corpus_id: CorpusId,
+        chunk_id: ChunkId,
+        revision_id: RevisionId,
+        vector: list[float],
+        model_name: str,
+        dimension: int,
+        similarity: str,
+    ) -> None:
+        """Store an embedding vector for a staged chunk.
+
+        The vector is validated against the store's declared dimension.
+        Staged embeddings become visible only after promote_revision() is called.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            chunk_id:    The chunk this embedding belongs to.
+            revision_id: The staged revision this embedding was produced for.
+            vector:      Unit-normalized embedding vector (for cosine similarity).
+            model_name:  Name/identifier of the embedding model.
+            dimension:   Declared dimension (must match the store's vector_dim).
+            similarity:  Similarity direction ('cosine', 'dot', 'euclidean').
+
+        Raises:
+            BackendError if the dimension mismatches, the similarity direction is
+                unknown, or (when similarity='cosine') the vector is not
+                unit-normalized.  Cosine scoring assumes unit vectors, so a
+                non-unit vector is rejected at write time rather than silently
+                corrupting similarity scores.
+        """
+        ...
+
+    def promote_revision(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> int:
+        """Atomically promote a staged revision to active visibility.
+
+        Flips all staged chunks and embeddings for *revision_id* to active=1,
+        updates FTS5 index rows, retires the previous active revision for the
+        same source, and updates the active_revision_pointer.
+
+        The entire promotion happens in one transaction; partial failure leaves
+        the previous revision active.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to promote.
+
+        Returns:
+            The number of chunks retired from the previous active revision that
+            this promotion superseded (0 when there was no prior revision).
+
+        Raises:
+            BackendError if the revision is not found or the transaction fails.
+        """
+        ...
+
+    def rollback_revision(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> None:
+        """Discard a staged revision without affecting the active revision.
+
+        Deletes all staged chunks, embeddings, and the revision record for
+        *revision_id*.  The active revision (if any) remains fully searchable.
+
+        Error contract: rollback failure is non-fatal in the coordinator;
+        the original error is always reported and the rollback failure is
+        swallowed to avoid masking it.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to discard.
+
+        Raises:
+            BackendError on SQLite write failure.
+        """
+        ...
+
+    def get_active_revision_id(
+        self, *, corpus_id: CorpusId, canonical_uri: str
+    ) -> RevisionId | None:
+        """Return the active RevisionId for *canonical_uri* in *corpus_id*, or None.
+
+        Args:
+            corpus_id:     Corpus namespace.
+            canonical_uri: Canonical source URI.
+
+        Returns:
+            Active RevisionId or None if no revision has been promoted.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def get_revision_hashes(
+        self,
+        *,
+        revision_id: RevisionId,
+        corpus_id: CorpusId,
+    ) -> tuple[str, str] | None:
+        """Return (content_hash, pipeline_fingerprint) for a revision, or None.
+
+        Args:
+            revision_id: Revision to look up.
+            corpus_id:   Corpus namespace.
+
+        Returns:
+            (content_hash, pipeline_fingerprint) tuple or None if not found.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def list_active_canonical_uris(self, *, corpus_id: CorpusId) -> list[str]:
+        """Return all canonical URIs with an active revision in *corpus_id*.
+
+        Args:
+            corpus_id: Corpus namespace.
+
+        Returns:
+            Unsorted list of canonical URI strings.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def list_active_revision_fingerprints(
+        self, *, corpus_id: CorpusId
+    ) -> list[tuple[str, str, str]]:
+        """Return (revision_id, content_hash, pipeline_fingerprint) for all active revisions.
+
+        Args:
+            corpus_id: Corpus namespace.
+
+        Returns:
+            List of (revision_id, content_hash, pipeline_fingerprint) tuples.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def create_build_run(
+        self,
+        *,
+        corpus_id: CorpusId,
+        pipeline_fingerprint: str,
+        started_at_iso: str,
+    ) -> str:
+        """Create a new build run record and return its string ID.
+
+        Args:
+            corpus_id:            Corpus namespace.
+            pipeline_fingerprint: Hash of the pipeline configuration.
+            started_at_iso:       ISO 8601 start time.
+
+        Returns:
+            BuildRunId string.
+
+        Raises:
+            BackendError on storage failure.
+        """
+        ...
+
+    def finish_build_run(
+        self,
+        *,
+        build_run_id: str,
+        status: str,
+        sources_scanned: int = 0,
+        sources_changed: int = 0,
+        chunks_added: int = 0,
+        chunks_deleted: int = 0,
+        errors: list[str] | None = None,
+    ) -> None:
+        """Record the completion of a build run.
+
+        Args:
+            build_run_id:    BuildRunId string.
+            status:          Final status ('success', 'failed', 'partial').
+            sources_scanned: Count of sources examined.
+            sources_changed: Count of sources that had changes.
+            chunks_added:    Count of new chunks written.
+            chunks_deleted:  Count of old chunks retired.
+            errors:          List of error message strings (may be empty).
+
+        Raises:
+            BackendError on storage failure.
+        """
+        ...
+
+    def get_build_run(self, *, build_run_id: str) -> dict[str, Any] | None:
+        """Retrieve build run metadata by ID, or None if not found.
+
+        Args:
+            build_run_id: BuildRunId string.
+
+        Returns:
+            Dict of run fields, or None.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def get_latest_build_run(self, *, corpus_id: CorpusId) -> dict[str, Any] | None:
+        """Return the most recent build run for *corpus_id*, or None if none exist.
+
+        "Most recent" is defined as the build run with the latest started_at_iso
+        timestamp (rowid as tiebreaker for identical timestamps).
+
+        Args:
+            corpus_id: Corpus namespace to query.
+
+        Returns:
+            Dict of run fields for the latest build run, or None if no build
+            runs have ever been recorded for this corpus.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def get_staged_chunks(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> list[Chunk]:
+        """Return all staged (active=0) chunks for *revision_id* in *corpus_id*.
+
+        Used by RevisionValidator to inspect staged data before promotion
+        without accessing private implementation attributes.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            List of Chunk records with active=0 for this revision.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def get_staged_embedding_count(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> int:
+        """Return the number of staged (active=0) embeddings for *revision_id*.
+
+        Used by RevisionValidator to confirm every staged chunk received an
+        embedding before promotion, guarding against a provider miscount that
+        would otherwise promote chunks with missing vectors.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            Non-negative integer count of staged embeddings.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def get_staged_embeddings(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> list[tuple[str, int]]:
+        """Return (chunk_id, dimension) for every staged embedding of *revision_id*.
+
+        Used by RevisionValidator to verify staged embedding dimensions match
+        the expected vector dimension before promotion.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            List of (chunk_id, dimension) tuples for staged (active=0) embeddings.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def schema_version(self) -> int:
+        """Return the highest applied migration version number.
+
+        Used by the sync pipeline to include the schema version in the pipeline
+        fingerprint, so that schema changes trigger re-ingestion automatically.
+
+        Returns:
+            Integer version number (0 if no migrations applied).
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def retire_revision(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> int:
+        """Retire an active revision by setting its chunks inactive and removing its pointer.
+
+        Used when a source is deleted from the connector between syncs.
+        All active chunks and embeddings for *revision_id* are deactivated and
+        removed from FTS5; the active_revision_pointer for the source is deleted.
+        The revision record itself is preserved for audit/history purposes.
+
+        Error contract: raises BackendError on storage failure.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The active revision to retire.
+
+        Returns:
+            The number of active chunks retired (0 if the revision had none).
+
+        Raises:
+            BackendError on SQLite write failure.
         """
         ...
 
