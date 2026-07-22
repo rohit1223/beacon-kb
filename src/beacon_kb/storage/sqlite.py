@@ -1151,6 +1151,37 @@ class SQLiteStore:
         return RevisionId(row["revision_id"])
 
     # ------------------------------------------------------------------
+    # Source info accessor
+    # ------------------------------------------------------------------
+
+    def get_source_info(self, source_id: str) -> tuple[str, str] | None:
+        """Return (canonical_uri, title) for the given source_id, or None if not found.
+
+        Used by the retrieval pipeline to resolve human-readable provenance fields
+        (canonical_uri and title) for evidence snippets.  The source row is written
+        by stage_revision() so every indexed document has a corresponding record.
+
+        Args:
+            source_id: String form of the SourceId hash.
+
+        Returns:
+            (canonical_uri, title) tuple, or None if no source row exists.
+
+        Raises:
+            BackendError: On SQLite read failure.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT canonical_uri, title FROM sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise BackendError(f"get_source_info failed: {exc}") from exc
+        if row is None:
+            return None
+        return (row["canonical_uri"], row["title"])
+
+    # ------------------------------------------------------------------
     # Manifest read-only query helpers
     # These methods expose typed public read paths for the IndexManifest
     # so that manifest.py never needs to reach into the private _conn.

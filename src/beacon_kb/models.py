@@ -398,6 +398,37 @@ class Hit:
 
 
 @dataclass(frozen=True, slots=True)
+class Snippet:
+    """A match-centered text excerpt preserving source provenance.
+
+    Placed in models.py to avoid an import cycle: Evidence references Snippet,
+    and snippets.py (which produces Snippet values) can safely import from models.py.
+
+    Attributes:
+        text:        The excerpt text (centered on the match span).
+        source_id:   String form of the chunk's SourceId.
+        source_uri:  Canonical URI of the source document.
+        title:       Human-readable title of the source document (may be empty).
+        locator:     Structural locator (heading path or page reference) from
+                     chunk.parent_locator.
+        char_start:  Character offset in the original chunk text where this
+                     snippet starts.
+        char_end:    Character offset in the original chunk text where this
+                     snippet ends (exclusive).
+        chunk_id:    String form of the ChunkId (for traceability).
+    """
+
+    text: str
+    source_id: str
+    source_uri: str
+    title: str
+    locator: str
+    char_start: int
+    char_end: int
+    chunk_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class Evidence:
     """A piece of evidence cited in an answer.
 
@@ -405,6 +436,14 @@ class Evidence:
     so the same chunk always receives the same label within one answer.
     Evidence items are structured objects; the system never returns
     preformatted Markdown as an evidence record.
+
+    context_of holds the EvidenceId of the primary HIT that this CONTEXT span
+    was expanded from.
+    None for primary HIT items.
+
+    snippet holds the match-centered text excerpt built from this evidence item's
+    chunk text.
+    None when snippet construction was skipped.
     """
 
     id: EvidenceId
@@ -413,6 +452,11 @@ class Evidence:
     """Stable label e.g. 'S1', 'S2' for inline citation in the answer text."""
 
     role: EvidenceRole = EvidenceRole.HIT
+    context_of: EvidenceId | None = None
+    """EvidenceId of the primary HIT this CONTEXT span was expanded from.  None for HIT items."""
+
+    snippet: Snippet | None = None
+    """Match-centered excerpt with source provenance.  None when not constructed."""
 
 
 @dataclass(frozen=True, slots=True)

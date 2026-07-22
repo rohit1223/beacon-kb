@@ -17,23 +17,32 @@ Importing this module performs no side effects beyond defining the public names.
 
 from __future__ import annotations
 
+from beacon_kb.retrieval.context import ContextExpansionResult, expand_and_pack
 from beacon_kb.retrieval.dense import EmbedderDenseRetriever
 from beacon_kb.retrieval.diversity import collapse_near_duplicates, mmr_diversify
 from beacon_kb.retrieval.filters import FilterSpec, apply_filters
 from beacon_kb.retrieval.fusion import RRFusion
+from beacon_kb.retrieval.pipeline import RetrievalPipeline, SearchResult
 from beacon_kb.retrieval.query import QueryVariants, prepare_query
 from beacon_kb.retrieval.rerank import RerankResult, rerank_hits
+from beacon_kb.retrieval.snippets import Snippet, build_snippet
 from beacon_kb.retrieval.sparse import BM25SparseRetriever
 
 __all__ = [
     "BM25SparseRetriever",
+    "ContextExpansionResult",
     "EmbedderDenseRetriever",
     "FilterSpec",
     "QueryVariants",
     "RRFusion",
     "RerankResult",
+    "RetrievalPipeline",
+    "SearchResult",
+    "Snippet",
     "apply_filters",
+    "build_snippet",
     "collapse_near_duplicates",
+    "expand_and_pack",
     "mmr_diversify",
     "prepare_query",
     "rerank_hits",
