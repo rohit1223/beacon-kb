@@ -226,8 +226,20 @@ class TestAnswerCostContract:
     def test_answer_calls_generator_exactly_once(self) -> None:
         from beacon_kb.facade import KnowledgeBase
 
+        # Supply a non-empty hit so pre-abstention does not fire.
+        chunk = Chunk(
+            id=ChunkId("c1"),
+            source_id=SourceId("s"),
+            revision_id=RevisionId("r"),
+            section_id=SectionId("sec"),
+            text="some content",
+            ordinal=0,
+            parent_locator="",
+        )
+        hit = Hit(chunk=chunk, sparse_score=5.0)
+
         sparse = MagicMock()
-        sparse.retrieve.return_value = []
+        sparse.retrieve.return_value = [hit]
         generator = MagicMock()
         generator.generate.return_value = self._make_answer_response("q1")
 
@@ -238,6 +250,9 @@ class TestAnswerCostContract:
         response = kb.answer(query)
 
         generator.generate.assert_called_once()
+        assert isinstance(response, AnswerResponse)
+        # With the controlled MagicMock response (non-ABSTAIN text, no [Sn]
+        # labels), post-abstention cannot fire, so the text passes through.
         assert response.answer_text == "The answer is 42."
 
 

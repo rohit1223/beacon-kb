@@ -37,6 +37,7 @@ from beacon_kb.models import (
     Query,
     SyncReport,
 )
+from beacon_kb.progress import Clock, monotonic_clock
 from beacon_kb.protocols import (
     Connector,
     DenseRetriever,
@@ -77,6 +78,9 @@ class KnowledgeBase:
         generator:       LLM answer generator (Generator protocol).
         token_counter:   Token counter.  Defaults to HeuristicTokenCounter.
         observer:        Progress observer (ProgressObserver protocol).
+        clock:           Injectable clock (``now() -> float``) used to time the
+                         retrieval stage inside ``answer()``.  Defaults to a
+                         real monotonic wall clock.
     """
 
     def __init__(
@@ -94,6 +98,7 @@ class KnowledgeBase:
         generator: Generator | None = None,
         token_counter: TokenCounter | None = None,
         observer: ProgressObserver | None = None,
+        clock: Clock | None = None,
     ) -> None:
         self._config: BeaconConfig = config if config is not None else BeaconConfig()
         self._connector: Connector | None = connector
@@ -109,6 +114,7 @@ class KnowledgeBase:
             token_counter if token_counter is not None else HeuristicTokenCounter()
         )
         self._observer: ProgressObserver | None = observer
+        self._clock: Clock = clock if clock is not None else monotonic_clock()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -267,26 +273,51 @@ class KnowledgeBase:
         """Retrieve evidence and generate an answer with exactly one LLM call.
 
         Runs the full retrieval pipeline (zero LLM calls) then passes the
-        evidence to the generator (exactly one LLM call).
+        evidence through the generation stage (at most one LLM call).
+        Pre-generation abstention fires deterministically when no evidence is
+        available or when evidence falls below the configured quality threshold,
+        skipping the LLM call entirely.
 
-        Cost contract: exactly one LLM call.
+        Cost contract: zero LLM calls for retrieval; at most one LLM call for
+        generation (skipped by pre-generation abstention when evidence is absent
+        or below policy).
 
         Args:
             query: Query record with text and optional corpus_id filter.
 
         Returns:
             AnswerResponse with answer_text, evidence, and citation records.
+            abstained=True with empty answer_text when no evidence is available
+            or when the generator cannot ground the answer.
 
         Raises:
             ReadinessError: If the generator is not injected.
+            ValueError:     If query.text is empty or whitespace-only.
             BackendError:   If retrieval or generation fails.
             CitationError:  If citation validation fails.
         """
         raw_generator = self._require(self._generator, "generator")
         generator: Generator = raw_generator
 
+        # Inline imports keep the facade free of generation/retrieval imports
+        # at module level.
+        from beacon_kb.generation.answer import run_answer
+        from beacon_kb.retrieval.query import prepare_query
+
+        # Prepare the query variants that drive retrieval; recorded in
+        # diagnostics.  The optional rewrite stage is not implemented yet
+        # (arrives with the agentic layer), so prepare_query() with no
+        # rewriters yields the variants that exist today.
+        query_variants = prepare_query(query)
+
         self._emit({"stage": "answer", "status": "retrieving", "query_id": query.id})
+
+        # Time the retrieval stage with the injectable clock so diagnostics
+        # record a real elapsed_retrieval_s (run_answer cannot measure it:
+        # it receives pre-computed hits).
+        t_retrieval_start = self._clock.now()
         hits = self.search(query)
+        elapsed_retrieval_s = self._clock.now() - t_retrieval_start
 
         self._emit(
             {
@@ -296,13 +327,17 @@ class KnowledgeBase:
                 "hit_count": len(hits),
             }
         )
-        response: AnswerResponse = generator.generate(
+
+        # Delegate to the generation stage: pre/post abstention + citation validation.
+        response, _diag = run_answer(
             query,
+            generator,
             hits,
-            max_input_tokens=self._config.answer.max_input_tokens,
-            max_output_tokens=self._config.answer.max_output_tokens,
+            config=self._config.answer,
+            observer=self._observer,
+            query_variants=query_variants,
+            elapsed_retrieval_s=elapsed_retrieval_s,
         )
-        self._emit({"stage": "answer", "status": "done", "query_id": query.id})
         return response
 
     # ------------------------------------------------------------------

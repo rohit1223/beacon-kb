@@ -399,6 +399,38 @@ class FakeGenerator:
         )
 
 
+class CountingGenerator:
+    """Generator wrapper that counts generate() calls and delegates to *inner*.
+
+    Wraps ANY Generator-protocol implementation.  Used by cost-contract tests
+    to assert exactly how many LLM calls a code path performs.
+
+    Attributes:
+        call_count: Number of times generate() has been called.
+    """
+
+    def __init__(self, inner: Generator) -> None:
+        self._inner: Generator = inner
+        self.call_count: int = 0
+
+    def generate(
+        self,
+        query: Query,
+        hits: list[Hit],
+        *,
+        max_input_tokens: int = 4096,
+        max_output_tokens: int = 512,
+    ) -> AnswerResponse:
+        """Count the call and delegate to the wrapped generator."""
+        self.call_count += 1
+        return self._inner.generate(
+            query,
+            hits,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+        )
+
+
 class FakeTokenCounter:
     """Deterministic TokenCounter fake using a simple word-based heuristic."""
 
@@ -1739,6 +1771,7 @@ __all__ = [
     "ChunkerContract",
     "ConnectorContract",
     "CorpusRouterContract",
+    "CountingGenerator",
     "DenseRetrieverContract",
     "EmbedderContract",
     "EvidenceGraderContract",

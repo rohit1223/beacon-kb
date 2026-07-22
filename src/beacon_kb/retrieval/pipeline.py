@@ -43,7 +43,7 @@ from beacon_kb.retrieval.dense import EmbedderDenseRetriever
 from beacon_kb.retrieval.diversity import collapse_near_duplicates, mmr_diversify
 from beacon_kb.retrieval.filters import FilterSpec
 from beacon_kb.retrieval.fusion import RRFusion
-from beacon_kb.retrieval.query import prepare_query
+from beacon_kb.retrieval.query import QueryVariants, prepare_query
 from beacon_kb.retrieval.rerank import rerank_hits
 from beacon_kb.retrieval.snippets import build_snippet
 from beacon_kb.retrieval.sparse import BM25SparseRetriever
@@ -80,11 +80,17 @@ class SearchResult:
         budget_summary: Result-count and token recap (produced before prompt
                         construction as required by the task spec).
         budget_recap:   Plain-text string of budget_summary (convenience for logging).
+        query_variants: QueryVariants record (original/sparse/dense texts) from
+                        prepare_query().  Additive field: defaults to None for
+                        backward compatibility, but pipeline.search() always
+                        populates it so downstream diagnostics can record the
+                        variants that drove retrieval.
     """
 
     evidence: list[Evidence]
     budget_summary: BudgetSummary
     budget_recap: str
+    query_variants: QueryVariants | None = None
 
 
 class RetrievalPipeline:
@@ -207,14 +213,15 @@ class RetrievalPipeline:
                      None means no additional filtering.
 
         Returns:
-            SearchResult with evidence list, BudgetSummary, and budget_recap.
+            SearchResult with evidence list, BudgetSummary, budget_recap, and
+            the QueryVariants record that drove retrieval.
 
         Raises:
             ValueError: If query.text is empty or whitespace-only.
             BackendError: On store read failure.
         """
         # 1. Query policy - validate and prepare text variants.
-        _ = prepare_query(query)  # raises ValueError on empty text
+        query_variants = prepare_query(query)  # raises ValueError on empty text
 
         # Apply per-query or config top_k.
         effective_top_k = self._resolve_top_k(query)
@@ -329,4 +336,5 @@ class RetrievalPipeline:
             evidence=snippeted_evidence,
             budget_summary=expansion.budget_summary,
             budget_recap=recap,
+            query_variants=query_variants,
         )

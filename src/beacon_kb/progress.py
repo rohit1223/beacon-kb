@@ -53,8 +53,12 @@ class _WallClock:
         return time.monotonic()
 
 
-def _default_clock() -> Clock:
-    """Return a clock reading real monotonic wall time."""
+def monotonic_clock() -> Clock:
+    """Return a clock reading real monotonic wall time.
+
+    Public factory used wherever an injectable clock defaults to real time
+    (e.g. the KnowledgeBase facade timing its retrieval stage).
+    """
     return _WallClock()
 
 
@@ -132,7 +136,7 @@ class LoggingProgressAdapter:
         clock: Clock | None = None,
     ) -> None:
         self._observer = observer
-        self._clock: Clock = clock if clock is not None else _default_clock()
+        self._clock: Clock = clock if clock is not None else monotonic_clock()
 
     def on_event(self, event: dict[str, Any]) -> None:
         """Forward event to inner observer and log it at DEBUG level.
@@ -184,7 +188,7 @@ def make_stage_emitter(
         clock:    Injectable clock (defaults to monotonic wall clock).
         total:    Total item count for current/total progress reporting.
     """
-    active_clock: Clock = clock if clock is not None else _default_clock()
+    active_clock: Clock = clock if clock is not None else monotonic_clock()
     t0: float = active_clock.now()
 
     def _emit_event(status: str, current: int = 0, message: str = "") -> None:

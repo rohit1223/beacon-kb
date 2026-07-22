@@ -584,6 +584,21 @@ class TestRetrievalPipeline:
         result = pipeline.search(q)
         assert isinstance(result.budget_summary, BudgetSummary)
 
+    def test_query_variants_populated(self) -> None:
+        """search() records the QueryVariants that drove retrieval on SearchResult."""
+        from beacon_kb.retrieval.query import QueryVariants
+        store = _make_store()
+        chunks = [_make_chunk("python tutorial content", ordinal=0)]
+        _populate_store(store, chunks)  # staged workflow: stage -> upsert -> promote
+        pipeline = self._build_pipeline(store)
+        q = Query(id=QueryId("q1"), text="python tutorial")
+        result = pipeline.search(q)
+        assert isinstance(result.query_variants, QueryVariants)
+        # No rewrite stage exists yet: all variants equal the original text.
+        assert result.query_variants.original_text == "python tutorial"
+        assert result.query_variants.sparse_text == "python tutorial"
+        assert result.query_variants.dense_text == "python tutorial"
+
     def test_deterministic_for_identical_inputs(self) -> None:
         """search() must be deterministic: identical inputs produce identical Evidence."""
         store = _make_store()
