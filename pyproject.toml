@@ -126,6 +126,7 @@ ignore = [
 "src/beacon_kb/config.py" = ["ANN401"]    # Any is intentional in _coerce_section for generic dataclass construction
 "src/beacon_kb/config_loader.py" = ["ANN401"]  # Any is intentional for env-var coercion over unknown field types
 "src/beacon_kb/facade.py" = ["ANN401"]    # Any is intentional in _require() helper for dynamic component routing
+"src/beacon_kb/testing.py" = ["ANN401", "S311"]  # Any in FakeStopCondition.should_stop; S311 is intentional - fakes use seeded RNG for determinism, not crypto
 
 [tool.mypy]
 python_version = "3.11"
