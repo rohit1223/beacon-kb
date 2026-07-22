@@ -5,11 +5,11 @@ All fakes are deterministic under a fixed seed using ``random.Random(seed)``.
 Contract test suites are abstract base classes with a ``make_subject()`` hook
 that subclasses implement to provide the implementation under test.
 
-Note: Contract suites for Parser and Chunker (``ParserContract``,
-``ChunkerContract``) are intentionally absent from this module.
-Those suites will be added together with the concrete implementations
-they exercise.
-``StoreContract`` is available in this module.
+Note: ``ChunkerContract`` was added together with the first concrete
+Chunker implementation (``HeadingAwareChunker``), per the Epic 01 deferral
+note.  A ``ParserContract`` suite remains intentionally absent and will be
+added when a reusable parser contract is needed.
+``StoreContract`` and ``ChunkerContract`` are available in this module.
 """
 
 from __future__ import annotations
@@ -1502,6 +1502,7 @@ class StoreContract:
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "ChunkerContract",
     "ConnectorContract",
     "CorpusRouterContract",
     "DenseRetrieverContract",
@@ -1512,8 +1513,10 @@ __all__ = [
     "FakeCorpusRouter",
     "FakeDenseRetriever",
     "FakeEmbedder",
+    "FakeEnricher",
     "FakeEvidenceGrader",
     "FakeFailingEmbedder",
+    "FakeFailingEnricher",
     "FakeFusion",
     "FakeGenerator",
     "FakeProgressObserver",
@@ -1536,3 +1539,200 @@ __all__ = [
     "TokenCounterContract",
     "ToolContract",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Enricher fakes - added in Epic 02.3.1
+# ---------------------------------------------------------------------------
+
+
+class FakeEnricher:
+    """Deterministic Enricher fake that returns pre-configured summaries.
+
+    Used to test enrichment integration without a real LLM.
+    """
+
+    def __init__(
+        self,
+        summaries: dict[str, str] | None = None,
+        *,
+        model_version: str = "fake-v1",
+    ) -> None:
+        self._summaries: dict[str, str] = summaries or {}
+        self.model_version: str = model_version
+        self.calls: list[str] = []
+
+    def enrich(self, text: str, *, prompt: str = "") -> str:
+        """Return a pre-configured summary or echo the text."""
+        self.calls.append(text)
+        return self._summaries.get(text, f"summary:{text[:20]}")
+
+
+class FakeFailingEnricher:
+    """Enricher fake that always raises IngestionError.
+
+    Used to test best-effort failure policy without a real LLM.
+    """
+
+    def __init__(self, *, message: str = "injected enrichment failure") -> None:
+        self._message = message
+        self.calls: int = 0
+
+    def enrich(self, text: str, *, prompt: str = "") -> str:
+        """Always raise IngestionError."""
+        self.calls += 1
+        raise IngestionError(self._message)
+
+
+# ---------------------------------------------------------------------------
+# ChunkerContract - contract test suite for Chunker implementations
+# ---------------------------------------------------------------------------
+
+
+class ChunkerContract(abc.ABC):
+    """Reusable contract-test suite for Chunker implementations.
+
+    Subclasses implement make_subject() to return the Chunker under test.
+    Tests verify: protocol conformance, determinism, content-addressed IDs,
+    real token overlap, fenced-code preservation.
+
+    All tests rely on a 'standard' section produced by _make_section() and
+    a 'fenced code' section produced by _make_fenced_section(). Subclasses
+    may override these to tailor inputs for a specific chunker's configuration.
+    """
+
+    @abc.abstractmethod
+    def make_subject(self) -> Any:
+        """Return a fresh Chunker instance for each test."""
+        ...
+
+    def _make_section(
+        self,
+        *,
+        text: str | None = None,
+        locator: str = "intro",
+        heading: str = "Introduction",
+    ) -> Any:
+        """Return a minimal Section for contract tests.
+
+        Imports Section-related models lazily to avoid circular imports at
+        module load time when testing.py is imported before beacon_kb.models.
+        """
+        from beacon_kb.models import (
+            RevisionId,
+            Section,
+            make_section_id,
+            make_source_id,
+        )
+
+        source_id = make_source_id(corpus="test-corpus", canonical_uri="fake://doc-1")
+        revision_id = RevisionId("rev-contract-test")
+        section_id = make_section_id(
+            source_id=str(source_id),
+            revision_id=str(revision_id),
+            locator=locator,
+        )
+        body = text if text is not None else (
+            "This section has enough content to test chunking behaviour. "
+            "It includes multiple sentences so the chunker can split them into child chunks. "
+            "Each child chunk should share a real token overlap with its neighbours. "
+            "The heading of this section is tracked in the parent locator. "
+            "Lorem ipsum dolor sit amet consectetur adipiscing elit. "
+            "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+        )
+        return Section(
+            id=section_id,
+            source_id=source_id,
+            revision_id=revision_id,
+            locator=locator,
+            heading=heading,
+            text=body,
+            ordinal=0,
+        )
+
+    def _make_fenced_section(self) -> Any:
+        """Return a Section containing a fenced code block."""
+        return self._make_section(
+            text=(
+                "Preamble text before the code block.\n"
+                "```python\n"
+                "def hello():\n"
+                "    return 'world'\n"
+                "```\n"
+                "Postamble text after the code block.\n"
+            ),
+            locator="code-example",
+            heading="Code Example",
+        )
+
+    def test_is_chunker_instance(self) -> None:
+        from beacon_kb.protocols import Chunker
+        subject = self.make_subject()
+        assert isinstance(subject, Chunker)
+
+    def test_chunk_returns_list_of_chunks(self) -> None:
+        from beacon_kb.models import Chunk
+        subject = self.make_subject()
+        section = self._make_section()
+        result = subject.chunk(section)
+        assert isinstance(result, list)
+        assert all(isinstance(c, Chunk) for c in result)
+
+    def test_chunk_deterministic(self) -> None:
+        subject = self.make_subject()
+        section = self._make_section()
+        r1 = subject.chunk(section)
+        r2 = subject.chunk(section)
+        assert [c.id for c in r1] == [c.id for c in r2], (
+            "ChunkerContract: chunk() must be deterministic for identical inputs."
+        )
+
+    def test_chunk_ids_content_addressed(self) -> None:
+        """Chunk IDs must be stable across independent instantiations."""
+        subject1 = self.make_subject()
+        subject2 = self.make_subject()
+        section = self._make_section()
+        r1 = subject1.chunk(section)
+        r2 = subject2.chunk(section)
+        assert [c.id for c in r1] == [c.id for c in r2], (
+            "ChunkerContract: chunk IDs must be identical for identical inputs "
+            "across independent instances (content-addressed, not random)."
+        )
+
+    def test_chunk_produces_child_chunks(self) -> None:
+        from beacon_kb.models import ChunkKind
+        subject = self.make_subject()
+        section = self._make_section()
+        result = subject.chunk(section)
+        child_chunks = [c for c in result if c.kind == ChunkKind.CHILD]
+        assert len(child_chunks) >= 1, (
+            "ChunkerContract: chunk() must produce at least one CHILD chunk."
+        )
+
+    def test_chunk_parent_locator_set(self) -> None:
+        subject = self.make_subject()
+        section = self._make_section(locator="some/path")
+        result = subject.chunk(section)
+        for chunk in result:
+            assert chunk.parent_locator, (
+                "ChunkerContract: all chunks must have parent_locator set to the section locator."
+            )
+
+    def test_empty_section_returns_list(self) -> None:
+        """An empty section body must return an empty list or single empty chunk."""
+        subject = self.make_subject()
+        section = self._make_section(text="")
+        result = subject.chunk(section)
+        assert isinstance(result, list)
+
+    def test_fenced_code_block_preserved(self) -> None:
+        """Fenced code blocks must not be split mid-block."""
+        subject = self.make_subject()
+        section = self._make_fenced_section()
+        result = subject.chunk(section)
+        # No chunk should contain only the opening ``` without the closing ```.
+        for chunk in result:
+            if "```python" in chunk.text:
+                assert "```" in chunk.text[chunk.text.index("```python") + 9:], (
+                    "ChunkerContract: fenced code block must not be split mid-block in any chunk."
+                )

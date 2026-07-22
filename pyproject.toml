@@ -133,6 +133,7 @@ ignore = [
 "src/beacon_kb/registry/__init__.py" = ["ANN401"]  # Any is intentional - plugins are dynamically typed by design
 "src/beacon_kb/registry/precedence.py" = ["ANN401", "S110"]  # Any for dynamic plugin objects; S110 for silent metadata fallback
 "src/beacon_kb/registry/groups.py" = ["S105"]  # S105 false-positive: TOKEN_COUNTERS is a group name string, not a password
+"src/beacon_kb/parsing/html.py" = ["ANN401"]  # Any is intentional for BeautifulSoup Tag/element params where bs4 is an optional deferred import
 
 [tool.mypy]
 # No python_version pin: mypy checks against the running interpreter so the

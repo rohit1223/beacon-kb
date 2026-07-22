@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -67,12 +68,49 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
+# Fenced code block delimiters (triple-backtick or triple-tilde).
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+
+
+def _extract_code_content(text: str) -> str:
+    """Extract lines inside fenced code blocks from *text*.
+
+    Returns a single string of code lines (joined by newline) for use as the
+    FTS5 ``code`` column value.  Preamble and postamble prose are excluded so
+    that identifier and function-name searches are boosted by this column.
+
+    Chunk records carry no explicit is_code field; code-ness is derived here
+    at FTS-index time by scanning for fenced blocks in the chunk text.
+
+    Args:
+        text: Raw chunk text possibly containing fenced code blocks.
+
+    Returns:
+        String of code content lines, or empty string if no fenced blocks.
+    """
+    code_lines: list[str] = []
+    in_fence = False
+    fence_char = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        m = _FENCE_RE.match(stripped)
+        if not in_fence:
+            if m:
+                in_fence = True
+                fence_char = m.group(1)[0]
+        elif m and m.group(1)[0] == fence_char:
+            in_fence = False
+        elif stripped:
+            code_lines.append(stripped)
+    return "\n".join(code_lines)
+
+
 # ---------------------------------------------------------------------------
 # Migration runner
 # ---------------------------------------------------------------------------
 
 
-def _apply_migrations(conn: sqlite3.Connection) -> None:
+def _apply_migrations(conn: sqlite3.Connection) -> bool:
     """Apply any unapplied SQL migrations in version order.
 
     Reads migration files from ``storage/migrations/`` named
@@ -81,6 +119,11 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
 
     Args:
         conn: Open SQLite connection in autocommit or transaction mode.
+
+    Returns:
+        True if migration 0002 was freshly applied in this call, meaning the
+        FTS5 table was dropped/recreated and must be repopulated from the
+        chunks table via :func:`_rebuild_fts_from_chunks`.
 
     Raises:
         BackendError: If a migration file cannot be read or executed.
@@ -100,6 +143,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         row[0] for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
     }
 
+    fts_rebuild_needed = False
     migration_files = sorted(_MIGRATION_DIR.glob("*.sql"))
     for mf in migration_files:
         # Extract version from filename prefix (e.g. "0001" -> 1).
@@ -129,6 +173,55 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
             raise BackendError(
                 f"Migration {version} failed: {exc}"
             ) from exc
+
+        if version == 2:
+            # Migration 0002 drops and recreates chunks_fts with the new
+            # multi-column layout; existing rows must be repopulated.
+            fts_rebuild_needed = True
+
+    return fts_rebuild_needed
+
+
+def _rebuild_fts_from_chunks(conn: sqlite3.Connection) -> None:
+    """Repopulate ``chunks_fts`` from active chunks after migration 0002.
+
+    Called once after migration 0002 is freshly applied because the FTS table
+    was dropped and recreated (FTS5 does not support ALTER TABLE ADD COLUMN).
+    Preserves existing single-column behaviour for old databases: rows are
+    rebuilt with text, heading (parent_locator), and code (fenced-block
+    content) columns populated.
+
+    Args:
+        conn: Open SQLite connection with migrations already applied.
+
+    Raises:
+        BackendError: On SQLite write failure during the rebuild.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT chunk_id, corpus_id, text, parent_locator FROM chunks WHERE active = 1"
+        ).fetchall()
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM chunks_fts")
+        for row in rows:
+            conn.execute(
+                "INSERT INTO chunks_fts (chunk_id, corpus_id, text, heading, code) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    row["chunk_id"],
+                    row["corpus_id"],
+                    row["text"],
+                    row["parent_locator"],
+                    _extract_code_content(row["text"]),
+                ),
+            )
+        conn.execute("COMMIT")
+    except sqlite3.Error as exc:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise BackendError(f"FTS rebuild after migration failed: {exc}") from exc
 
 
 def _check_fts5(conn: sqlite3.Connection) -> None:
@@ -239,7 +332,10 @@ class SQLiteStore:
             raise BackendError(f"Cannot open SQLite database at {self._db_path!r}: {exc}") from exc
 
         _check_fts5(conn)
-        _apply_migrations(conn)
+        if _apply_migrations(conn):
+            # Migration 0002 dropped/recreated chunks_fts; repopulate it from
+            # the active chunks so existing databases keep their sparse index.
+            _rebuild_fts_from_chunks(conn)
         return conn
 
     def close(self) -> None:
@@ -300,8 +396,19 @@ class SQLiteStore:
                     "DELETE FROM chunks_fts WHERE chunk_id = ?", (str(chunk.id),)
                 )
                 self._conn.execute(
-                    "INSERT INTO chunks_fts (chunk_id, corpus_id, text) VALUES (?, ?, ?)",
-                    (str(chunk.id), "", chunk.text),
+                    "INSERT INTO chunks_fts (chunk_id, corpus_id, text, heading, code) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(chunk.id),
+                        "",
+                        chunk.text,
+                        # heading column: Chunk has no heading_text field; the
+                        # parent_locator carries the heading path (e.g.
+                        # 'install/quickstart') and is the minimal correct source.
+                        chunk.parent_locator,
+                        # code column: fenced-block content derived from the text.
+                        _extract_code_content(chunk.text),
+                    ),
                 )
             self._conn.execute("COMMIT")
         except sqlite3.Error as exc:
@@ -591,8 +698,15 @@ class SQLiteStore:
                     "DELETE FROM chunks_fts WHERE chunk_id = ?", (row["chunk_id"],)
                 )
                 self._conn.execute(
-                    "INSERT INTO chunks_fts (chunk_id, corpus_id, text) VALUES (?, ?, ?)",
-                    (row["chunk_id"], str(corpus_id), row["text"]),
+                    "INSERT INTO chunks_fts (chunk_id, corpus_id, text, heading, code) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        row["chunk_id"],
+                        str(corpus_id),
+                        row["text"],
+                        row["parent_locator"],
+                        _extract_code_content(row["text"]),
+                    ),
                 )
 
             # Activate embeddings for new revision.
@@ -794,11 +908,29 @@ class SQLiteStore:
     # FTS5 sparse retrieval
     # ------------------------------------------------------------------
 
-    def retrieve(self, query: Query) -> list[Hit]:
-        """BM25 sparse retrieval using FTS5.
+    def retrieve(
+        self,
+        query: Query,
+        *,
+        weights: tuple[float, float, float] | None = None,
+    ) -> list[Hit]:
+        """BM25 sparse retrieval using FTS5 with optional per-column weights.
+
+        The FTS5 table (migration 0002) indexes three columns separately:
+        ``text`` (chunk body), ``heading`` (parent locator heading path), and
+        ``code`` (fenced-block content).  When *weights* is provided, the
+        bm25() ranking uses those per-column weights; UNINDEXED columns
+        (chunk_id, corpus_id) always receive weight 0.  When *weights* is
+        omitted, plain ``bm25(chunks_fts)`` is used, preserving the existing
+        single-expression behaviour for all databases.
+
+        Epic 03's sparse retriever adopts the per-column weights; this method
+        only provides the store capability.
 
         Args:
-            query: Query record with text, corpus_id filter, and top_k.
+            query:   Query record with text, corpus_id filter, and top_k.
+            weights: Optional (w_text, w_heading, w_code) BM25 column weights.
+                     Safe default is None (uniform FTS5 weighting).
 
         Returns:
             List of Hit records with sparse_score set, ordered descending.
@@ -807,10 +939,17 @@ class SQLiteStore:
         Raises:
             BackendError: On index read failure.
         """
+        bm25_expr = "bm25(chunks_fts)"
+        if weights is not None:
+            w_text, w_heading, w_code = (float(w) for w in weights)
+            # Column order matches migration 0002: chunk_id(0), corpus_id(0),
+            # text, heading, code.  Values are validated floats formatted by
+            # Python - never raw user strings - so interpolation is safe.
+            bm25_expr = f"bm25(chunks_fts, 0.0, 0.0, {w_text}, {w_heading}, {w_code})"
         try:
             if query.corpus_id is not None:
                 rows = self._conn.execute(
-                    """
+                    f"""
                     SELECT
                         c.chunk_id,
                         c.source_id,
@@ -823,7 +962,7 @@ class SQLiteStore:
                         c.token_count,
                         c.prev_chunk_id,
                         c.next_chunk_id,
-                        bm25(chunks_fts) AS score
+                        {bm25_expr} AS score
                     FROM chunks_fts
                     JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
                     WHERE chunks_fts MATCH ?
@@ -831,12 +970,12 @@ class SQLiteStore:
                       AND c.active = 1
                     ORDER BY score
                     LIMIT ?
-                    """,
+                    """,  # noqa: S608 - bm25_expr is built from validated floats only
                     (query.text, str(query.corpus_id), query.top_k),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    """
+                    f"""
                     SELECT
                         c.chunk_id,
                         c.source_id,
@@ -849,14 +988,14 @@ class SQLiteStore:
                         c.token_count,
                         c.prev_chunk_id,
                         c.next_chunk_id,
-                        bm25(chunks_fts) AS score
+                        {bm25_expr} AS score
                     FROM chunks_fts
                     JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
                     WHERE chunks_fts MATCH ?
                       AND c.active = 1
                     ORDER BY score
                     LIMIT ?
-                    """,
+                    """,  # noqa: S608 - bm25_expr is built from validated floats only
                     (query.text, query.top_k),
                 ).fetchall()
         except sqlite3.Error as exc:
