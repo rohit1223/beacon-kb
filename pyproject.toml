@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "beacon-kb"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Agentic retrieval-augmented generation library with a modular, plugin-driven pipeline"
 readme = "README.md"
 license = "MIT"
@@ -93,6 +93,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 beacon_kb = ["py.typed"]
 
+[tool.setuptools.dynamic]
+version = {attr = "beacon_kb.version.__version__"}
+
 [tool.ruff]
 src = ["src"]
 line-length = 100
@@ -120,6 +123,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN", "S"]
 "src/beacon_kb/protocols.py" = ["ANN401"]  # Any is intentional in StopCondition/Tool/ProgressObserver protocol params that accept opaque objects
+"src/beacon_kb/config.py" = ["ANN401"]    # Any is intentional in _coerce_section for generic dataclass construction
+"src/beacon_kb/config_loader.py" = ["ANN401"]  # Any is intentional for env-var coercion over unknown field types
+"src/beacon_kb/facade.py" = ["ANN401"]    # Any is intentional in _require() helper for dynamic component routing
 
 [tool.mypy]
 python_version = "3.11"

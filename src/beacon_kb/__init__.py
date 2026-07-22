@@ -10,7 +10,6 @@ when this module is imported.
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
 __author__ = "Rohit Kumar"
 
 # ---------------------------------------------------------------------------
@@ -19,6 +18,14 @@ __author__ = "Rohit Kumar"
 # so eager loading is safe and imposes no startup cost.
 # ---------------------------------------------------------------------------
 
+from beacon_kb.config import (
+    AgenticConfig,
+    AnswerConfig,
+    BeaconConfig,
+    CoreConfig,
+    PluginsConfig,
+    RetrievalConfig,
+)
 from beacon_kb.errors import (
     AgenticError,
     BackendError,
@@ -33,6 +40,7 @@ from beacon_kb.errors import (
     ProtocolMismatch,
     ReadinessError,
 )
+from beacon_kb.facade import KnowledgeBase
 from beacon_kb.models import (
     AgenticStep,
     AgenticTrace,
@@ -88,13 +96,18 @@ from beacon_kb.protocols import (
     TokenCounter,
     Tool,
 )
+from beacon_kb.version import PLUGIN_API_VERSION, __version__
 
 __all__ = [
+    "PLUGIN_API_VERSION",
+    "AgenticConfig",
     "AgenticError",
     "AgenticStep",
     "AgenticTrace",
+    "AnswerConfig",
     "AnswerResponse",
     "BackendError",
+    "BeaconConfig",
     "BeaconError",
     "BudgetError",
     "BuildRunId",
@@ -106,6 +119,7 @@ __all__ = [
     "CitationError",
     "ConfigError",
     "Connector",
+    "CoreConfig",
     "Corpus",
     "CorpusId",
     "CorpusRouter",
@@ -120,10 +134,12 @@ __all__ = [
     "Generator",
     "IngestionChange",
     "IngestionError",
+    "KnowledgeBase",
     "Parser",
     "PluginConflict",
     "PluginError",
     "PluginNotFound",
+    "PluginsConfig",
     "ProgressObserver",
     "ProtocolMismatch",
     "Query",
@@ -132,6 +148,7 @@ __all__ = [
     "RawDocument",
     "ReadinessError",
     "Reranker",
+    "RetrievalConfig",
     "Revision",
     "RevisionId",
     "Section",
