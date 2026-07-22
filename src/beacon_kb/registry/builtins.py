@@ -68,5 +68,16 @@ def _register_builtins() -> None:
         instance=EmbedderDenseRetriever(store=_store, embedder=None, similarity="cosine"),
     )
 
+    # FUSION: RRFusion is the built-in rank-based fusion strategy.
+    # Registered via register() (the explicit path) so list_plugins() returns it.
+    # Same convention as the sparse/dense retrievers above.
+    from beacon_kb.retrieval.fusion import RRFusion
+
+    precedence.register(
+        group=groups.FUSION,
+        name="rrf",
+        instance=RRFusion(),
+    )
+
 
 _register_builtins()

@@ -432,19 +432,23 @@ class TestBM25SparseRetriever:
         assert [h.sparse_score for h in r1] == [h.sparse_score for h in r2]
 
     def test_filters_applied_before_candidates_returned(self) -> None:
-        """Filters apply consistently and cannot be bypassed."""
-        chunks = [
-            _make_chunk("python tutorial", uri="fake://doc-1"),
-            _make_chunk("python advanced", uri="fake://doc-2", ordinal=1),
-        ]
-        store = self._store_with_chunks(chunks)
-        spec = FilterSpec(source_uris=frozenset({"fake://doc-1"}))
+        """Filters apply consistently and cannot be bypassed.
+
+        source_uris must be populated with str(chunk.source_id) - the SHA-256 hash
+        produced by make_source_id() - not the raw canonical URI.
+        """
+        chunk1 = _make_chunk("python tutorial", uri="fake://doc-1")
+        chunk2 = _make_chunk("python advanced", uri="fake://doc-2", ordinal=1)
+        # Filter on the hash-form source_id of chunk1 only.
+        keep_source_id = str(chunk1.source_id)
+        store = self._store_with_chunks([chunk1, chunk2])
+        spec = FilterSpec(source_uris=frozenset({keep_source_id}))
         retriever = BM25SparseRetriever(store=store, filter_spec=spec)
         q = Query(id=QueryId("q1"), text="python")
         hits = retriever.retrieve(q)
-        # source_id is hash-based; filter was applied consistently.
-        # At most one chunk from doc-1 can appear.
-        assert len(hits) <= 1  # at most the doc-1 chunk
+        # Only chunk1 (from fake://doc-1) should survive the filter.
+        assert len(hits) == 1
+        assert hits[0].chunk.id == chunk1.id
 
     def test_error_code_boost_ranks_above_generic(self) -> None:
         """Exact error-code token in text should rank higher than generic terms."""

@@ -94,10 +94,10 @@ def apply_filters(hits: list[Hit], spec: FilterSpec) -> list[Hit]:
 
 def _passes_all(hit: Hit, spec: FilterSpec) -> bool:
     """Return True if *hit* passes all active constraints in *spec*."""
-    # Source URI filter: match against the string form of source_id.
-    # When source_uris is non-empty, the hit must have a source_id string
-    # that is present in the set.  Callers using FakeConnector or similar
-    # patterns (where source_id IS the URI string) can use this directly.
+    # Source filter: match against str(chunk.source_id), which is the
+    # SHA-256-derived hash produced by make_source_id(corpus, canonical_uri).
+    # Callers must resolve a canonical URI to its source_id hash first
+    # (via make_source_id()) before populating FilterSpec.source_uris.
     if spec.source_uris:
         source_id_str = str(hit.chunk.source_id)
         if source_id_str not in spec.source_uris:

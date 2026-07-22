@@ -18,8 +18,11 @@ Importing this module performs no side effects beyond defining the public names.
 from __future__ import annotations
 
 from beacon_kb.retrieval.dense import EmbedderDenseRetriever
+from beacon_kb.retrieval.diversity import collapse_near_duplicates, mmr_diversify
 from beacon_kb.retrieval.filters import FilterSpec, apply_filters
+from beacon_kb.retrieval.fusion import RRFusion
 from beacon_kb.retrieval.query import QueryVariants, prepare_query
+from beacon_kb.retrieval.rerank import RerankResult, rerank_hits
 from beacon_kb.retrieval.sparse import BM25SparseRetriever
 
 __all__ = [
@@ -27,6 +30,11 @@ __all__ = [
     "EmbedderDenseRetriever",
     "FilterSpec",
     "QueryVariants",
+    "RRFusion",
+    "RerankResult",
     "apply_filters",
+    "collapse_near_duplicates",
+    "mmr_diversify",
     "prepare_query",
+    "rerank_hits",
 ]
