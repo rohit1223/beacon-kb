@@ -1,0 +1,156 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beacon-kb"
+version = "0.1.0"
+description = "Agentic retrieval-augmented generation library with a modular, plugin-driven pipeline"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Rohit Kumar", email = "rohit.k.1223@gmail.com" }]
+requires-python = ">=3.11"
+keywords = ["rag", "knowledge-base", "agentic", "retrieval", "embeddings"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+html = [
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+]
+pdf = [
+    "pypdf>=4.0",
+]
+web = [
+    "httpx>=0.27",
+]
+confluence = [
+    "httpx>=0.27",
+    "atlassian-python-api>=3.41",
+]
+remote = [
+    "httpx>=0.27",
+]
+# stdlib-only; no third-party deps - declared for extras-matrix parity
+local = []
+mcp = [
+    "mcp>=1.0",
+]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "build>=1.2",
+]
+
+[project.scripts]
+beacon-kb = "beacon_kb.cli:main"
+bkb = "beacon_kb.cli:main"
+
+[project.entry-points."beacon_kb.connectors"]
+
+[project.entry-points."beacon_kb.parsers"]
+
+[project.entry-points."beacon_kb.chunkers"]
+
+[project.entry-points."beacon_kb.embedders"]
+
+[project.entry-points."beacon_kb.stores"]
+
+[project.entry-points."beacon_kb.retrievers"]
+
+[project.entry-points."beacon_kb.fusion"]
+
+[project.entry-points."beacon_kb.rerankers"]
+
+[project.entry-points."beacon_kb.generators"]
+
+[project.entry-points."beacon_kb.token_counters"]
+
+[project.entry-points."beacon_kb.planners"]
+
+[project.entry-points."beacon_kb.graders"]
+
+[project.entry-points."beacon_kb.routers"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+beacon_kb = ["py.typed"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "ANN", # flake8-annotations
+    "S",   # flake8-bandit
+    "RUF", # ruff-specific
+]
+ignore = [
+    "S101",   # use of assert (needed in tests)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short -q"
+markers = [
+    "unit: Fast, pure-Python unit tests with no I/O",
+    "contract: Protocol-conformance and interface-contract tests",
+    "integration: Tests requiring external services or real I/O",
+    "plugins: Plugin discovery and entry-point loading tests",
+    "cli: Command-line interface tests",
+    "evaluation: RAG evaluation and quality-metric tests",
+    "performance: Latency and throughput benchmarks",
+]
+
+[tool.coverage.run]
+source = ["src/beacon_kb"]
+branch = true
+omit = ["src/beacon_kb/py.typed"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
