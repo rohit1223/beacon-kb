@@ -56,3 +56,6 @@ pip-wheel-metadata/
 # Sample plugin build artifacts
 tests/plugins/sample_plugin/src/*.egg-info/
 tests/plugins/sample_plugin/*.egg-info/
+
+# Claude files
+.claude/
