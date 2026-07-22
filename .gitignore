@@ -1,0 +1,58 @@
+# Python byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python distribution / packaging
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+sdist/
+*.whl
+*.tar.gz
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+
+# Mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff
+.ruff_cache/
+
+# Local index directories (pip-download-cache, simple index, etc.)
+simple/
+wheelhouse/
+pip-wheel-metadata/
+
+# Editor / IDE artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project-specific: planning docs and agent scratchpad
+.superpowers/
+
+# Sample plugin build artifacts
+tests/plugins/sample_plugin/src/*.egg-info/
+tests/plugins/sample_plugin/*.egg-info/

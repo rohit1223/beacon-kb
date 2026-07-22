@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beacon-kb-sample-plugin"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.entry-points."beacon_kb.connectors"]
+sample-memory = "beacon_kb_sample_plugin.connector:SampleMemoryConnector"
+
+[tool.setuptools.packages.find]
+where = ["src"]

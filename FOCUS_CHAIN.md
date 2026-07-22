@@ -10,11 +10,11 @@
 
 ### Track A: Standalone Package, Contracts, and Registry (Epic 01, starts immediately)
 
-- [ ] 1. EPIC-01 TASK-01.1.1 [S | 8f | ~250 LOC] Scaffold the standalone distribution and quality toolchain - depends: none
-- [ ] 2. EPIC-01 TASK-01.1.2 [L | 4f | ~700 LOC] Define frozen domain models, typed IDs, errors, and all pipeline and agentic-strategy protocols - depends: 01.1.1
-- [ ] 3. EPIC-01 TASK-01.1.3 [M | 5f | ~470 LOC] Define typed config, the loader, and the facade shell with PLUGIN_API_VERSION - depends: 01.1.2 [parallel-safe]
-- [ ] 4. EPIC-01 TASK-01.2.2 [M | 4f | ~340 LOC] Provide deterministic fakes and contract harnesses - depends: 01.1.2 [parallel-safe]
-- [ ] 5. EPIC-01 TASK-01.2.1 [M | 5f | ~460 LOC] Implement the entry-point plugin registry - depends: 01.1.3
+- [x] 1. EPIC-01 TASK-01.1.1 [S | 8f | ~250 LOC] Scaffold the standalone distribution and quality toolchain - depends: none
+- [x] 2. EPIC-01 TASK-01.1.2 [L | 4f | ~700 LOC] Define frozen domain models, typed IDs, errors, and all pipeline and agentic-strategy protocols - depends: 01.1.1
+- [x] 3. EPIC-01 TASK-01.1.3 [M | 5f | ~470 LOC] Define typed config, the loader, and the facade shell with PLUGIN_API_VERSION - depends: 01.1.2 [parallel-safe]
+- [x] 4. EPIC-01 TASK-01.2.2 [M | 4f | ~340 LOC] Provide deterministic fakes and contract harnesses - depends: 01.1.2 [parallel-safe]
+- [x] 5. EPIC-01 TASK-01.2.1 [M | 5f | ~460 LOC] Implement the entry-point plugin registry - depends: 01.1.3
   ↳ Commit checkpoint after TASK-01.2.1 (contracts, config, registry, and fakes; end of Epic 01)
 
 ### Track B: Local Storage, Ingestion, and Incremental Indexing (Epic 02, parallel with Track C - depends: Track A complete)
