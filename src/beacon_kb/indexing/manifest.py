@@ -18,57 +18,19 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Any
 
 from beacon_kb.errors import BackendError
 from beacon_kb.models import CorpusId, IngestionChange, RevisionId
 from beacon_kb.protocols import Store
 
 # ---------------------------------------------------------------------------
-# Fingerprint helpers
-# ---------------------------------------------------------------------------
-
-
-def build_pipeline_fingerprint(*, chunker_params: dict[str, Any], embedder_version: str) -> str:
-    """Return a deterministic fingerprint of the pipeline configuration.
-
-    Inputs: chunker configuration parameters and embedder version string.
-    Identical inputs always reproduce the same fingerprint across processes.
-
-    Args:
-        chunker_params:   Flat dict of chunker parameters (e.g. chunk_size,
-                          chunk_overlap).  Values are coerced to strings.
-        embedder_version: Stable version string for the embedder
-                          (e.g. model name + version tag).
-
-    Returns:
-        32-character hex string (SHA-256 prefix).
-    """
-    parts = [f"{k}={v}" for k, v in sorted(chunker_params.items())]
-    parts.append(f"embedder={embedder_version}")
-    canonical = "|".join(parts)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-
-
-def build_content_fingerprint(content_hash: str, pipeline_fingerprint: str) -> str:
-    """Return a combined fingerprint that changes when EITHER content OR pipeline changes.
-
-    Used to detect INCOMPATIBLE changes: even when content is unchanged, a
-    pipeline change requires full re-ingestion.
-
-    Args:
-        content_hash:         Hash of the raw document bytes.
-        pipeline_fingerprint: Hash of the pipeline configuration.
-
-    Returns:
-        32-character hex string.
-    """
-    combined = f"{content_hash}:{pipeline_fingerprint}"
-    return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:32]
-
-
-# ---------------------------------------------------------------------------
 # Revision status record
+#
+# The authoritative pipeline fingerprint is built by
+# ``beacon_kb.ingestion.planning.build_pipeline_fingerprint`` (parser + chunker
+# params + enrichment + embedder model + dimension + schema version).  This
+# module deliberately exposes NO fingerprint helper of its own so there is a
+# single source of truth for invalidation.
 # ---------------------------------------------------------------------------
 
 

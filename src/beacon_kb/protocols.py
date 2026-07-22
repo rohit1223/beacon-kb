@@ -159,6 +159,18 @@ class Embedder(Protocol):
         ...
 
     @property
+    def model_name(self) -> str:
+        """Return a stable identifier for the embedding model.
+
+        Used in the pipeline fingerprint and stored alongside embeddings so a
+        model change triggers re-ingestion.  Implementations should return a
+        stable, non-empty string (e.g. ``'openai/text-embedding-3-small'`` or a
+        fake's canonical name).  Older embedders that predate this property are
+        handled by the pipeline via a documented duck-typed fallback.
+        """
+        ...
+
+    @property
     def batch_size(self) -> int:
         """Return the provider-owned batch size hint.
 
@@ -295,7 +307,11 @@ class Store(Protocol):
             similarity:  Similarity direction ('cosine', 'dot', 'euclidean').
 
         Raises:
-            BackendError if dimension mismatches or similarity is unknown.
+            BackendError if the dimension mismatches, the similarity direction is
+                unknown, or (when similarity='cosine') the vector is not
+                unit-normalized.  Cosine scoring assumes unit vectors, so a
+                non-unit vector is rejected at write time rather than silently
+                corrupting similarity scores.
         """
         ...
 
@@ -304,7 +320,7 @@ class Store(Protocol):
         *,
         corpus_id: CorpusId,
         revision_id: RevisionId,
-    ) -> None:
+    ) -> int:
         """Atomically promote a staged revision to active visibility.
 
         Flips all staged chunks and embeddings for *revision_id* to active=1,
@@ -317,6 +333,10 @@ class Store(Protocol):
         Args:
             corpus_id:   Corpus namespace.
             revision_id: The staged revision to promote.
+
+        Returns:
+            The number of chunks retired from the previous active revision that
+            this promotion superseded (0 when there was no prior revision).
 
         Raises:
             BackendError if the revision is not found or the transaction fails.
@@ -518,6 +538,53 @@ class Store(Protocol):
         """
         ...
 
+    def get_staged_embedding_count(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> int:
+        """Return the number of staged (active=0) embeddings for *revision_id*.
+
+        Used by RevisionValidator to confirm every staged chunk received an
+        embedding before promotion, guarding against a provider miscount that
+        would otherwise promote chunks with missing vectors.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            Non-negative integer count of staged embeddings.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
+    def get_staged_embeddings(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> list[tuple[str, int]]:
+        """Return (chunk_id, dimension) for every staged embedding of *revision_id*.
+
+        Used by RevisionValidator to verify staged embedding dimensions match
+        the expected vector dimension before promotion.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            List of (chunk_id, dimension) tuples for staged (active=0) embeddings.
+
+        Raises:
+            BackendError on I/O failure.
+        """
+        ...
+
     def schema_version(self) -> int:
         """Return the highest applied migration version number.
 
@@ -537,7 +604,7 @@ class Store(Protocol):
         *,
         corpus_id: CorpusId,
         revision_id: RevisionId,
-    ) -> None:
+    ) -> int:
         """Retire an active revision by setting its chunks inactive and removing its pointer.
 
         Used when a source is deleted from the connector between syncs.
@@ -550,6 +617,9 @@ class Store(Protocol):
         Args:
             corpus_id:   Corpus namespace.
             revision_id: The active revision to retire.
+
+        Returns:
+            The number of active chunks retired (0 if the revision had none).
 
         Raises:
             BackendError on SQLite write failure.

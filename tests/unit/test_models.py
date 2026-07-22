@@ -1128,6 +1128,10 @@ class TestPositiveProtocolConformance:
                 return 1
 
             @property
+            def model_name(self) -> str:
+                return "minimal"
+
+            @property
             def batch_size(self) -> int:
                 return 8
 

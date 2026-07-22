@@ -18,9 +18,9 @@ Design guarantees enforced here:
   see each other's records.
 - FTS5 capability is checked at startup with typed BackendError.
 
-Importing this module has the side effect of registering the SQLiteStore as
-the default 'sqlite' store in the beacon_kb.stores entry-point group, via
-the module-level call at the bottom of this file.
+Importing this module performs no side effects.  SQLiteStore is NOT registered
+as a built-in default (see registry/builtins.py): a store requires a concrete
+db_path and vector_dim, so callers construct and register it explicitly.
 """
 
 from __future__ import annotations
@@ -110,20 +110,21 @@ def _extract_code_content(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _apply_migrations(conn: sqlite3.Connection) -> bool:
+def _apply_migrations(conn: sqlite3.Connection) -> None:
     """Apply any unapplied SQL migrations in version order.
 
     Reads migration files from ``storage/migrations/`` named
     ``<version>_<description>.sql`` (e.g. ``0001_initial.sql``).
     Records each applied version in the ``schema_migrations`` table.
 
+    The FTS rebuild is deliberately NOT triggered from here.  Whether the
+    ``chunks_fts`` table needs repopulating is decided from durable state on
+    every open via :func:`_fts_rebuild_needed`, so a crash between the version
+    commit and the rebuild self-heals on the next open instead of leaving a
+    permanently empty FTS index.
+
     Args:
         conn: Open SQLite connection in autocommit or transaction mode.
-
-    Returns:
-        True if migration 0002 was freshly applied in this call, meaning the
-        FTS5 table was dropped/recreated and must be repopulated from the
-        chunks table via :func:`_rebuild_fts_from_chunks`.
 
     Raises:
         BackendError: If a migration file cannot be read or executed.
@@ -143,7 +144,6 @@ def _apply_migrations(conn: sqlite3.Connection) -> bool:
         row[0] for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
     }
 
-    fts_rebuild_needed = False
     migration_files = sorted(_MIGRATION_DIR.glob("*.sql"))
     for mf in migration_files:
         # Extract version from filename prefix (e.g. "0001" -> 1).
@@ -174,12 +174,39 @@ def _apply_migrations(conn: sqlite3.Connection) -> bool:
                 f"Migration {version} failed: {exc}"
             ) from exc
 
-        if version == 2:
-            # Migration 0002 drops and recreates chunks_fts with the new
-            # multi-column layout; existing rows must be repopulated.
-            fts_rebuild_needed = True
 
-    return fts_rebuild_needed
+def _fts_rebuild_needed(conn: sqlite3.Connection) -> bool:
+    """Return True if ``chunks_fts`` must be repopulated from durable state.
+
+    The rebuild decision is derived from durable state, NOT from "was migration
+    0002 freshly applied this call".  Migration 0002 drops/recreates the FTS
+    table and commits its version row in a transaction separate from the
+    application-layer rebuild; a crash in between would otherwise leave the DB
+    at version=2 with a permanently empty ``chunks_fts``.
+
+    Rebuild is needed when there is at least one active chunk but the FTS index
+    holds zero rows.  This is safe and idempotent: it fires only when the two
+    are out of sync (post-migration or post-crash) and never when the FTS index
+    is already populated or when there are simply no active chunks.
+
+    Args:
+        conn: Open SQLite connection with migrations already applied.
+
+    Returns:
+        True if the FTS index should be rebuilt from the active chunks.
+    """
+    try:
+        active_chunks = conn.execute(
+            "SELECT COUNT(*) FROM chunks WHERE active = 1"
+        ).fetchone()[0]
+        if not active_chunks:
+            return False
+        fts_rows = conn.execute("SELECT COUNT(*) FROM chunks_fts").fetchone()[0]
+    except sqlite3.Error:
+        # If the tables are not yet present (fresh DB mid-migration) there is
+        # nothing to rebuild.
+        return False
+    return bool(active_chunks) and not fts_rows
 
 
 def _rebuild_fts_from_chunks(conn: sqlite3.Connection) -> None:
@@ -295,6 +322,15 @@ class SQLiteStore:
     promotion transaction flips the active pointers and FTS5 index rows.
     Rollback leaves any prior active revision fully searchable.
 
+    Threading: this store owns exactly ONE SQLite connection and is
+    SINGLE-THREADED.  The connection is opened WITHOUT
+    ``check_same_thread=False``, so using a store instance from a thread other
+    than the one that created it raises immediately rather than risking silent
+    corruption from an unsynchronised shared connection.  Callers needing
+    concurrent access must create one store per thread or serialise access
+    externally.  A pooled/locked multi-threaded variant is tracked in
+    ROADMAP.md ("pooled/locked store variant").
+
     Args:
         db_path:    Path to the SQLite database file.  Created if absent.
         vector_dim: Declared vector dimension for this store.  All embeddings
@@ -324,7 +360,12 @@ class SQLiteStore:
             BackendError: On FTS5 missing or migration failure.
         """
         try:
-            conn = sqlite3.connect(self._db_path, isolation_level=None, check_same_thread=False)
+            # check_same_thread stays at its default (True): this store owns ONE
+            # connection and is single-threaded.  Failing fast on cross-thread
+            # use is preferable to silent corruption from an unsynchronised
+            # shared connection.  A pooled/locked variant is tracked in
+            # ROADMAP.md.
+            conn = sqlite3.connect(self._db_path, isolation_level=None)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA foreign_keys=ON")
@@ -332,9 +373,14 @@ class SQLiteStore:
             raise BackendError(f"Cannot open SQLite database at {self._db_path!r}: {exc}") from exc
 
         _check_fts5(conn)
-        if _apply_migrations(conn):
-            # Migration 0002 dropped/recreated chunks_fts; repopulate it from
-            # the active chunks so existing databases keep their sparse index.
+        _apply_migrations(conn)
+        # Decide the FTS rebuild from DURABLE STATE at every open, not from
+        # "migration 0002 was freshly applied this call".  Migration 0002 commits
+        # its version row in a separate transaction from this rebuild; if the
+        # process crashed between the two, the DB would be left at version=2 with
+        # an empty chunks_fts forever.  Rebuilding whenever active chunks exist
+        # but chunks_fts is empty is idempotent and self-heals that crash window.
+        if _fts_rebuild_needed(conn):
             _rebuild_fts_from_chunks(conn)
         return conn
 
@@ -602,7 +648,7 @@ class SQLiteStore:
         *,
         corpus_id: CorpusId,
         revision_id: RevisionId,
-    ) -> None:
+    ) -> int:
         """Atomically promote a staged revision to active visibility.
 
         This is the single visibility boundary:
@@ -620,9 +666,14 @@ class SQLiteStore:
             corpus_id:   Corpus namespace.
             revision_id: The staged revision to promote.
 
+        Returns:
+            The number of chunks retired from the PREVIOUS active revision that
+            this promotion superseded (0 when there was no prior revision).
+
         Raises:
             BackendError: If the revision is not found or the transaction fails.
         """
+        retired_count = 0
         try:
             self._conn.execute("BEGIN")
 
@@ -666,6 +717,7 @@ class SQLiteStore:
                     ).fetchall()
                 ]
                 if old_chunk_ids:
+                    retired_count = len(old_chunk_ids)
                     # Build parametrized IN clause: placeholders is only "?,?,?"
                     # (question marks), never user-supplied strings.
                     placeholders = ",".join("?" * len(old_chunk_ids))
@@ -729,6 +781,7 @@ class SQLiteStore:
             )
 
             self._conn.execute("COMMIT")
+            return retired_count
         except BackendError:
             raise
         except sqlite3.Error as exc:
@@ -831,7 +884,12 @@ class SQLiteStore:
             similarity:  Similarity direction ('cosine', 'dot', 'euclidean').
 
         Raises:
-            BackendError: If dimension mismatches or similarity is unknown.
+            BackendError: If the dimension mismatches, the similarity direction
+                is unknown, or (when similarity='cosine') the vector is not
+                unit-normalized.  Cosine scoring treats the dot product as the
+                cosine, which only holds for unit vectors; a non-unit vector is
+                rejected here so callers cannot silently store unnormalized
+                embeddings that would corrupt similarity scores.
         """
         # Validate dimension against both the passed value and the store's dim.
         validate_dimension(vector, self._vector_dim)
@@ -1496,12 +1554,76 @@ class SQLiteStore:
             raise BackendError(f"get_staged_chunks failed: {exc}") from exc
         return [_row_to_chunk(row) for row in rows]
 
+    def get_staged_embedding_count(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> int:
+        """Return the number of staged (active=0) embeddings for *revision_id*.
+
+        Used by RevisionValidator to confirm every staged chunk received an
+        embedding before promotion, guarding against a provider miscount that
+        would otherwise promote chunks with missing vectors.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            Non-negative integer count of staged embeddings.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM embeddings "
+                "WHERE revision_id = ? AND corpus_id = ? AND active = 0",
+                (str(revision_id), str(corpus_id)),
+            ).fetchone()
+        except Exception as exc:
+            raise BackendError(f"get_staged_embedding_count failed: {exc}") from exc
+        return int(row["c"]) if row else 0
+
+    def get_staged_embeddings(
+        self,
+        *,
+        corpus_id: CorpusId,
+        revision_id: RevisionId,
+    ) -> list[tuple[str, int]]:
+        """Return (chunk_id, dimension) for every staged embedding of *revision_id*.
+
+        Used by RevisionValidator to verify staged embedding dimensions match
+        the expected vector dimension before promotion, without decoding the
+        vector blobs.
+
+        Args:
+            corpus_id:   Corpus namespace.
+            revision_id: The staged revision to inspect.
+
+        Returns:
+            List of (chunk_id, dimension) tuples for staged (active=0) embeddings.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT chunk_id, dimension FROM embeddings "
+                "WHERE revision_id = ? AND corpus_id = ? AND active = 0",
+                (str(revision_id), str(corpus_id)),
+            ).fetchall()
+        except Exception as exc:
+            raise BackendError(f"get_staged_embeddings failed: {exc}") from exc
+        return [(row["chunk_id"], int(row["dimension"])) for row in rows]
+
     def retire_revision(
         self,
         *,
         corpus_id: CorpusId,
         revision_id: RevisionId,
-    ) -> None:
+    ) -> int:
         """Retire an active revision by setting its chunks inactive and removing its pointer.
 
         This is the inverse of promote_revision: it removes a source from the
@@ -1519,9 +1641,13 @@ class SQLiteStore:
             corpus_id:   Corpus namespace.
             revision_id: The active revision to retire.
 
+        Returns:
+            The number of active chunks retired (0 if the revision had none).
+
         Raises:
             BackendError: On SQLite write failure.
         """
+        retired_count = 0
         try:
             self._conn.execute("BEGIN")
 
@@ -1534,6 +1660,7 @@ class SQLiteStore:
             chunk_ids = [row["chunk_id"] for row in chunk_rows]
 
             if chunk_ids:
+                retired_count = len(chunk_ids)
                 placeholders = ",".join("?" * len(chunk_ids))
                 self._conn.execute(
                     f"UPDATE chunks SET active = 0 WHERE chunk_id IN ({placeholders})",  # noqa: S608
@@ -1566,6 +1693,7 @@ class SQLiteStore:
                     )
 
             self._conn.execute("COMMIT")
+            return retired_count
         except sqlite3.Error as exc:
             try:
                 self._conn.execute("ROLLBACK")
@@ -1596,8 +1724,9 @@ class SQLiteStore:
 # ---------------------------------------------------------------------------
 # Registration note
 #
-# SQLiteStore is registered as the default 'sqlite' store in
-# registry/builtins.py, which is imported eagerly by registry/__init__.py.
-# No registration call is made here to avoid potential double-registration
-# when this module is imported independently of the registry package.
+# SQLiteStore is NOT registered as a built-in default (see registry/builtins.py
+# for the rationale): a store needs a concrete db_path and vector_dim, so a
+# throwaway default instance would be a footgun.  Callers construct a
+# SQLiteStore explicitly and, if they want registry resolution, register it via
+# precedence.register(group=groups.STORES, name="sqlite", instance=...).
 # ---------------------------------------------------------------------------

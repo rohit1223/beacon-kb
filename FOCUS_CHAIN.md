@@ -19,12 +19,12 @@
 
 ### Track B: Local Storage, Ingestion, and Incremental Indexing (Epic 02, parallel with Track C - depends: Track A complete)
 
-- [ ] 6. EPIC-02 TASK-02.1.1 [L | 5f | ~600 LOC] Implement the transactional SQLite store with staged atomic promotion - depends: 01.2.1, 01.2.2 [parallel-safe]
-- [ ] 7. EPIC-02 TASK-02.2.1 [M | 5f | ~380 LOC] Implement source identity and filesystem and memory connectors - depends: 01.2.1, 01.2.2 [parallel-safe]
-- [ ] 8. EPIC-02 TASK-02.2.2 [L | 6f | ~620 LOC] Implement structure-aware Markdown, HTML, and PDF parsers - depends: 02.2.1
+- [x] 6. EPIC-02 TASK-02.1.1 [L | 5f | ~600 LOC] Implement the transactional SQLite store with staged atomic promotion - depends: 01.2.1, 01.2.2 [parallel-safe]
+- [x] 7. EPIC-02 TASK-02.2.1 [M | 5f | ~380 LOC] Implement source identity and filesystem and memory connectors - depends: 01.2.1, 01.2.2 [parallel-safe]
+- [x] 8. EPIC-02 TASK-02.2.2 [L | 6f | ~620 LOC] Implement structure-aware Markdown, HTML, and PDF parsers - depends: 02.2.1
   ↳ Commit checkpoint after TASK-02.2.2 (store plus source-and-parser slice around 1600 LOC)
-- [ ] 9. EPIC-02 TASK-02.3.1 [L | 5f | ~560 LOC] Implement parent/child chunking, optional enrichment, and batched embeddings - depends: 02.2.2, 02.1.1
-- [ ] 10. EPIC-02 TASK-02.3.2 [L | 5f | ~570 LOC] Implement staged full and incremental synchronization - depends: 02.3.1
+- [x] 9. EPIC-02 TASK-02.3.1 [L | 5f | ~560 LOC] Implement parent/child chunking, optional enrichment, and batched embeddings - depends: 02.2.2, 02.1.1
+- [x] 10. EPIC-02 TASK-02.3.2 [L | 5f | ~570 LOC] Implement staged full and incremental synchronization - depends: 02.3.1
   ↳ Commit checkpoint after TASK-02.3.2 (deterministic indexing lifecycle; end of Epic 02)
 
 ### Track C: Hybrid Retrieval, Context, and Grounded Answers (Epic 03, parallel with Track B - depends: Track A complete; joins Track B at chunking and sync boundaries)

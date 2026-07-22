@@ -26,51 +26,55 @@ def _register_builtins() -> None:
         instance=HeuristicTokenCounter(),
     )
 
-    # STORES: SQLiteStore is the built-in default store.
-    # Import is deferred to avoid circular imports at module load time.
-    from beacon_kb.storage.sqlite import SQLiteStore
-
-    _store = SQLiteStore(db_path=":memory:", vector_dim=16)
-    precedence.register_builtin(
-        group=groups.STORES,
-        name="sqlite",
-        instance=_store,
-    )
-
-    # RETRIEVERS: sparse and dense built-in retrievers.
+    # STORES: no built-in default is registered.
+    # A store cannot be constructed without a concrete db_path and vector_dim.
+    # Registering a throwaway ``:memory:`` / 16-dim SQLiteStore here would mint
+    # a live instance that, if resolved, silently reads/writes an isolated
+    # in-memory database with the wrong dimension - a footgun.  We leave the
+    # group empty so resolve() raises PluginNotFound (its message lists the
+    # installed names).  Callers construct and register a store explicitly:
     #
-    # Convention: the beacon_kb.retrievers group's default protocol maps to
-    # SparseRetriever (see registry/groups.py).  Anyone resolving a dense
-    # retriever must pass ``protocol=DenseRetriever`` explicitly:
+    #   from beacon_kb.storage.sqlite import SQLiteStore
+    #   from beacon_kb.registry import precedence, groups
+    #   precedence.register(
+    #       group=groups.STORES,
+    #       name="sqlite",
+    #       instance=SQLiteStore(db_path="/path/to/kb.db", vector_dim=768),
+    #   )
+
+    # RETRIEVERS: no built-in default is registered.
+    # Both BM25SparseRetriever and EmbedderDenseRetriever require a concrete
+    # SQLiteStore at construction time.  Registering them bound to a throwaway
+    # ``:memory:`` / 16-dim store would silently yield an isolated in-memory
+    # instance with the wrong dimension when resolved - the same footgun as the
+    # store itself.  We leave the group empty so resolve() raises PluginNotFound.
+    # Callers construct a real store first, then build and register the retrievers:
+    #
+    #   from beacon_kb.storage.sqlite import SQLiteStore
+    #   from beacon_kb.retrieval.sparse import BM25SparseRetriever
+    #   from beacon_kb.retrieval.dense import EmbedderDenseRetriever
+    #   from beacon_kb.registry import precedence, groups
+    #
+    #   store = SQLiteStore(db_path="/path/to/kb.db", vector_dim=768)
+    #   precedence.register(
+    #       group=groups.RETRIEVERS,
+    #       name="bm25",
+    #       instance=BM25SparseRetriever(store=store),
+    #   )
+    #   precedence.register(
+    #       group=groups.RETRIEVERS,
+    #       name="dense",
+    #       instance=EmbedderDenseRetriever(store=store, embedder=my_embedder, similarity="cosine"),
+    #   )
+    #
+    # Note: resolving a dense retriever requires ``protocol=DenseRetriever`` explicitly
+    # because the group's canonical protocol is SparseRetriever.  This documented
+    # escape hatch bypasses the automatic SparseRetriever check:
     #   registry.resolve(groups.RETRIEVERS, "dense", protocol=DenseRetriever)
-    # This documented escape hatch bypasses the automatic SparseRetriever check.
-    # Do NOT change the group-protocol map; document the convention here only.
-    #
-    # Both retrievers are registered via ``register()`` (the explicit path) so
-    # that ``list_plugins()`` and ``resolve(group, name)`` both work - the same
-    # path a third-party plugin would use.  register_builtin() is not used here
-    # because the built-in slot holds only one entry per group; explicit
-    # registration supports multiple named plugins in the same group.
-    from beacon_kb.retrieval.dense import EmbedderDenseRetriever
-    from beacon_kb.retrieval.sparse import BM25SparseRetriever
-
-    precedence.register(
-        group=groups.RETRIEVERS,
-        name="bm25",
-        instance=BM25SparseRetriever(store=_store),
-    )
-
-    # Dense retriever with no embedder (sparse-only degraded mode default).
-    # Callers that supply an embedder construct EmbedderDenseRetriever directly.
-    precedence.register(
-        group=groups.RETRIEVERS,
-        name="dense",
-        instance=EmbedderDenseRetriever(store=_store, embedder=None, similarity="cosine"),
-    )
 
     # FUSION: RRFusion is the built-in rank-based fusion strategy.
     # Registered via register() (the explicit path) so list_plugins() returns it.
-    # Same convention as the sparse/dense retrievers above.
+    # RRFusion is stateless and safe to register as a default.
     from beacon_kb.retrieval.fusion import RRFusion
 
     precedence.register(
@@ -102,26 +106,23 @@ def _register_builtins() -> None:
     #       instance=FilesystemConnector(root=..., corpus=..., patterns=[...]),
     #   )
 
-    # CHUNKERS: HeadingAwareChunker is the built-in default chunker.
-    # The default instance is registered with sentinel identity values so the
-    # 'heading_aware' name is discoverable via resolve(); production callers
-    # always construct their own HeadingAwareChunker with the live corpus,
-    # canonical URI, revision, and pipeline fingerprint for their build run.
-    # Import is deferred to avoid circular imports at module load time.
-    from beacon_kb.ingestion.chunking import HeadingAwareChunker
-
-    precedence.register_builtin(
-        group=groups.CHUNKERS,
-        name="heading_aware",
-        instance=HeadingAwareChunker(
-            corpus="__default__",
-            canonical_uri="__default__",
-            revision_id="__default__",
-            pipeline_fingerprint="__default__",
-            max_tokens=512,
-            overlap_tokens=64,
-        ),
-    )
+    # CHUNKERS: no built-in default is registered.
+    # A HeadingAwareChunker is bound to a specific corpus, canonical URI,
+    # revision, and pipeline fingerprint at construction.  Registering a
+    # ``__default__``-identity instance here would mint chunks with bogus
+    # identity if it were ever resolved.  We leave the group empty so resolve()
+    # raises PluginNotFound; the sync pipeline builds a fresh chunker per source
+    # via its chunker_factory.  Callers that need registry resolution construct
+    # and register their own instance explicitly:
+    #
+    #   from beacon_kb.ingestion.chunking import HeadingAwareChunker
+    #   from beacon_kb.registry import precedence, groups
+    #   precedence.register(
+    #       group=groups.CHUNKERS,
+    #       name="heading_aware",
+    #       instance=HeadingAwareChunker(corpus=..., canonical_uri=...,
+    #                                    revision_id=..., pipeline_fingerprint=...),
+    #   )
 
     # PARSERS: MarkdownParser is the built-in default parser.
     # Import is deferred to avoid circular imports at module load time.

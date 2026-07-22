@@ -758,20 +758,50 @@ class TestEmbedderDenseRetrieverContract(DenseRetrieverContract):
 
 
 class TestRegistryDiscovery:
-    """Both retrievers must be discovered via beacon_kb.retrievers group.
+    """Both retrievers must be discoverable via the beacon_kb.retrievers group
+    after explicit construction and registration.
 
-    These tests explicitly re-run _register_builtins() before each test
-    to be order-independent: other test suites (registry contract tests)
-    legitimately call clear_registry() to reset state between their own
-    tests, which removes our built-ins.  Re-registering here is idempotent.
+    These tests reset the registry, construct a real SQLiteStore, build the
+    retrievers, register them explicitly, then verify resolution.  This mirrors
+    the documented caller pattern: there are no built-in retriever defaults
+    (registering a throwaway store is a footgun), so callers always supply a
+    real store.
+
+    Registry state is restored after each test to avoid leaking names into
+    other suites.
     """
 
     def setup_method(self) -> None:
-        """Re-register built-ins so registry tests are order-independent."""
+        """Reset registry and re-register builtins so tests are order-independent."""
+        from beacon_kb.registry import discovery, precedence
         from beacon_kb.registry.builtins import _register_builtins
+
+        precedence.clear_registry()
+        discovery.reset_scan_state()
         _register_builtins()
 
+    def teardown_method(self) -> None:
+        """Restore registry to a clean-builtins state after each test."""
+        from beacon_kb.registry import discovery, precedence
+        from beacon_kb.registry.builtins import _register_builtins
+
+        precedence.clear_registry()
+        discovery.reset_scan_state()
+        _register_builtins()
+
+    def _register_retrievers(self) -> tuple[BM25SparseRetriever, EmbedderDenseRetriever]:
+        """Construct a real SQLiteStore, build both retrievers, and register them."""
+        from beacon_kb.registry import groups, precedence
+
+        store = SQLiteStore(db_path=":memory:", vector_dim=16)
+        sparse = BM25SparseRetriever(store=store)
+        dense = EmbedderDenseRetriever(store=store, embedder=None, similarity="cosine")
+        precedence.register(group=groups.RETRIEVERS, name="bm25", instance=sparse)
+        precedence.register(group=groups.RETRIEVERS, name="dense", instance=dense)
+        return sparse, dense
+
     def test_sparse_retriever_registered_in_group(self) -> None:
+        self._register_retrievers()
         from beacon_kb import registry
         from beacon_kb.registry import groups
 
@@ -779,6 +809,7 @@ class TestRegistryDiscovery:
         assert "bm25" in names, f"Expected 'bm25' in retrievers group, got: {names}"
 
     def test_dense_retriever_registered_in_group(self) -> None:
+        self._register_retrievers()
         from beacon_kb import registry
         from beacon_kb.registry import groups
 
@@ -787,18 +818,39 @@ class TestRegistryDiscovery:
 
     def test_sparse_retriever_resolve_by_name(self) -> None:
         """Resolve 'bm25' by name from the group - same path as third-party plugins."""
+        self._register_retrievers()
         from beacon_kb import registry
         from beacon_kb.registry import groups
 
-        # The registered builtin is a BM25SparseRetriever instance
         plugin = registry.resolve(groups.RETRIEVERS, "bm25")
         assert isinstance(plugin, SparseRetriever)
 
     def test_dense_retriever_resolve_with_protocol(self) -> None:
         """Dense retriever resolved with protocol=DenseRetriever (documented escape hatch)."""
+        self._register_retrievers()
         from beacon_kb import registry
         from beacon_kb.protocols import DenseRetriever
         from beacon_kb.registry import groups
 
         plugin = registry.resolve(groups.RETRIEVERS, "dense", protocol=DenseRetriever)
         assert isinstance(plugin, DenseRetriever)
+
+    def test_retrievers_not_in_group_when_unregistered(self) -> None:
+        """Without explicit registration, the RETRIEVERS group must be empty (PluginNotFound)."""
+        from beacon_kb import registry
+        from beacon_kb.errors import PluginNotFound
+        from beacon_kb.registry import groups
+
+        # No retriever registered - resolving any name raises PluginNotFound.
+        with pytest.raises(PluginNotFound):
+            registry.resolve(groups.RETRIEVERS, "bm25")
+
+    def test_unregistered_dense_raises_plugin_not_found(self) -> None:
+        """Without explicit registration, resolving 'dense' raises PluginNotFound."""
+        from beacon_kb import registry
+        from beacon_kb.errors import PluginNotFound
+        from beacon_kb.protocols import DenseRetriever
+        from beacon_kb.registry import groups
+
+        with pytest.raises(PluginNotFound):
+            registry.resolve(groups.RETRIEVERS, "dense", protocol=DenseRetriever)

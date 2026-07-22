@@ -136,15 +136,22 @@ class FakeFailingEmbedder:
         dim: int = 16,
         batch_size: int = 8,
         message: str = "injected failure",
+        model_name: str = "fake-failing-embedder",
     ) -> None:
         self._dim: int = dim
         self._batch_size: int = batch_size
         self._message: str = message
+        self._model_name: str = model_name
 
     @property
     def batch_size(self) -> int:
         """Provider-owned batch size hint."""
         return self._batch_size
+
+    @property
+    def model_name(self) -> str:
+        """Stable model identifier for fingerprinting."""
+        return self._model_name
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Always raise BackendError."""
@@ -218,15 +225,22 @@ class FakeEmbedder:
         dim: int = 16,
         batch_size: int = 8,
         seed: int = _DEFAULT_SEED,
+        model_name: str = "fake-embedder",
     ) -> None:
         self._dim: int = dim
         self._batch_size: int = batch_size
         self._seed: int = seed
+        self._model_name: str = model_name
 
     @property
     def batch_size(self) -> int:
         """Provider-owned batch size hint."""
         return self._batch_size
+
+    @property
+    def model_name(self) -> str:
+        """Stable model identifier for fingerprinting."""
+        return self._model_name
 
     def _embed_one(self, text: str) -> list[float]:
         rng = random.Random(self._seed ^ _text_digest(text))
@@ -686,6 +700,19 @@ class EmbedderContract(abc.ABC):
     def test_dimension_positive(self) -> None:
         subject = self.make_subject()
         assert subject.dimension() > 0
+
+    def test_model_name_is_non_empty_string(self) -> None:
+        """Embedder contract: model_name must be a stable, non-empty string.
+
+        The pipeline reads model_name for the fingerprint and stores it with
+        each embedding, so a change of model forces re-ingestion.
+        """
+        subject = self.make_subject()
+        name = subject.model_name
+        assert isinstance(name, str) and name, (
+            "Embedder contract: model_name must be a non-empty string. "
+            f"Got: {name!r}"
+        )
 
     def test_embed_returns_correct_shape(self) -> None:
         subject = self.make_subject()
@@ -1693,6 +1720,79 @@ class StoreContract:
             f"StoreContract: get_staged_chunks() must return the staged chunk. Got {len(staged)}."
         )
         assert staged[0].id == chunk.id
+
+    def test_get_staged_embeddings_and_count(self) -> None:
+        """get_staged_embedding_count/get_staged_embeddings reflect staged embeddings."""
+        from beacon_kb.models import (
+            CorpusId,
+            Revision,
+            make_revision_id,
+            make_source_id,
+        )
+        subject = self.make_subject()
+        corpus_id = CorpusId("contract-corpus")
+        canonical_uri = "fake://staged-emb-doc"
+        content_hash = "cafed00d"
+        pipeline_fp = "test-fp-emb"
+
+        source_id = make_source_id(corpus=str(corpus_id), canonical_uri=canonical_uri)
+        revision_id = make_revision_id(
+            source_id=str(source_id),
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        revision = Revision(
+            id=revision_id,
+            source_id=source_id,
+            content_hash=content_hash,
+            pipeline_fingerprint=pipeline_fp,
+        )
+        chunk = self._make_chunk(
+            corpus=str(corpus_id), uri=canonical_uri, revision_id=str(revision_id)
+        )
+
+        subject.stage_revision(
+            corpus_id=corpus_id, revision=revision, canonical_uri=canonical_uri
+        )
+        subject.upsert_chunks_to_staging(
+            corpus_id=corpus_id, revision_id=revision_id, chunks=[chunk]
+        )
+
+        # No embeddings staged yet.
+        assert subject.get_staged_embedding_count(
+            corpus_id=corpus_id, revision_id=revision_id
+        ) == 0, "StoreContract: staged embedding count must start at 0."
+        assert subject.get_staged_embeddings(
+            corpus_id=corpus_id, revision_id=revision_id
+        ) == [], "StoreContract: get_staged_embeddings() must start empty."
+
+        # Stage one unit-normalized embedding of the store's declared dimension.
+        dim = int(getattr(subject, "_vector_dim", 16))
+        vector = _unit_normalize([1.0] + [0.0] * (dim - 1))
+        subject.upsert_embedding(
+            corpus_id=corpus_id,
+            chunk_id=chunk.id,
+            revision_id=revision_id,
+            vector=vector,
+            model_name="contract-embedder",
+            dimension=dim,
+            similarity="cosine",
+        )
+
+        assert subject.get_staged_embedding_count(
+            corpus_id=corpus_id, revision_id=revision_id
+        ) == 1, "StoreContract: staged embedding count must reflect the staged embedding."
+        staged_embs = subject.get_staged_embeddings(
+            corpus_id=corpus_id, revision_id=revision_id
+        )
+        assert len(staged_embs) == 1, (
+            "StoreContract: get_staged_embeddings() must return the staged embedding."
+        )
+        emb_chunk_id, emb_dim = staged_embs[0]
+        assert emb_chunk_id == str(chunk.id)
+        assert emb_dim == dim, (
+            f"StoreContract: staged embedding dimension must equal {dim}. Got {emb_dim}."
+        )
 
     def test_get_latest_build_run_none_when_no_runs(self) -> None:
         """get_latest_build_run() returns None when no build runs exist for the corpus."""

@@ -43,6 +43,9 @@ class RevisionOutcome:
         revision_id:      The RevisionId that was staged.
         promoted:         True if the revision was successfully promoted.
         chunks_written:   Number of chunks staged.
+        chunks_retired:   Number of chunks retired from the previous active
+                          revision that this promotion superseded (0 when there
+                          was no prior revision or promotion did not occur).
         validation:       ValidationResult from pre-promotion checks.
         error:            Error message string, or '' if no error.
     """
@@ -52,6 +55,7 @@ class RevisionOutcome:
     chunks_written: int
     validation: ValidationResult
     error: str = ""
+    chunks_retired: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +107,10 @@ class RevisionCoordinator:
         Args:
             corpus_id:             Corpus namespace.
             canonical_uri:         Stable URI for the source document.
-            content_hash:          SHA-256 of the raw document bytes.
+            content_hash:          SHA-256 of the DECODED document text (UTF-8),
+                                   matching the sync pipeline's content-hash
+                                   convention.  The single documented convention
+                                   is: hash the decoded text, not the raw bytes.
             pipeline_fingerprint:  Full pipeline fingerprint string.
             chunks:                Ordered list of Chunk records to stage.
             embeddings:            List of (chunk_id_str, vector) pairs, one per chunk.
@@ -183,8 +190,12 @@ class RevisionCoordinator:
                     error=error_msg,
                 )
 
-            # Promote: flip active pointers atomically.
-            self._store.promote_revision(corpus_id=corpus_id, revision_id=revision_id)
+            # Promote: flip active pointers atomically.  The store returns the
+            # number of chunks retired from the previous active revision that
+            # this promotion superseded.
+            retired = self._store.promote_revision(
+                corpus_id=corpus_id, revision_id=revision_id
+            )
 
             return RevisionOutcome(
                 revision_id=revision_id,
@@ -192,6 +203,7 @@ class RevisionCoordinator:
                 chunks_written=len(chunks),
                 validation=validation,
                 error="",
+                chunks_retired=retired,
             )
 
         except BackendError as exc:
