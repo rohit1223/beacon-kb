@@ -122,13 +122,20 @@ class PluginNotFound(PluginError):
     Args:
         group: The entry-point group that was searched.
         name: The plugin name that was not found.
+        installed: Optional list of plugin names that ARE available in the group,
+            included in the message so the caller can pick a valid name.
     """
 
-    def __init__(self, group: str, name: str) -> None:
+    def __init__(self, group: str, name: str, installed: list[str] | None = None) -> None:
         self.group = group
         self.name = name
+        self.installed = installed if installed is not None else []
+        if self.installed:
+            available = f"Installed names: {self.installed}."
+        else:
+            available = "No plugins are installed in this group."
         super().__init__(
-            f"Plugin '{name}' not found in group '{group}'. "
+            f"Plugin '{name}' not found in group '{group}'. {available} "
             f"Ensure the package is installed and the entry-point is declared."
         )
 
