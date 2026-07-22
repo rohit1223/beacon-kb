@@ -59,5 +59,36 @@ def _register_builtins() -> None:
     #       instance=FilesystemConnector(root=..., corpus=..., patterns=[...]),
     #   )
 
+    # PARSERS: MarkdownParser is the built-in default parser.
+    # Import is deferred to avoid circular imports at module load time.
+    from beacon_kb.parsing.markdown import MarkdownParser
+
+    precedence.register_builtin(
+        group=groups.PARSERS,
+        name="markdown",
+        instance=MarkdownParser(),
+    )
+    # HtmlParser and PdfParser are NOT registered as built-in defaults.
+    # They depend on optional extras (beautifulsoup4/lxml and pypdf respectively).
+    # Registering them at import time would either import the optional dependency
+    # eagerly (breaking base-package installs) or require lazy-import wrappers
+    # that the current registry has no factory mechanism for.
+    # Callers must construct and register them explicitly:
+    #
+    #   from beacon_kb.parsing.html import HtmlParser
+    #   from beacon_kb.registry import precedence, groups
+    #   precedence.register(
+    #       group=groups.PARSERS,
+    #       name="html",
+    #       instance=HtmlParser(),
+    #   )
+    #
+    #   from beacon_kb.parsing.pdf import PdfParser
+    #   precedence.register(
+    #       group=groups.PARSERS,
+    #       name="pdf",
+    #       instance=PdfParser(),
+    #   )
+
 
 _register_builtins()

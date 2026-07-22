@@ -91,6 +91,40 @@ def resolve_media_type(uri: str) -> str:
     return guessed if guessed else _FALLBACK_MEDIA_TYPE
 
 
+def is_text_media_type(media_type: str) -> bool:
+    """Return ``True`` if *media_type* represents text-decodable content.
+
+    Text-decodable types are those for which a standard text encoding
+    (e.g. UTF-8) produces meaningful, lossless content.  Binary formats
+    (``application/pdf``, ``image/*``, ``application/octet-stream``) are
+    explicitly excluded.
+
+    This function is the single source of truth for text-decodability policy
+    in beacon-kb.  All callers that need to decide whether to attempt text
+    decoding must use this function rather than maintaining their own inline
+    tuple of known types.
+
+    Args:
+        media_type: A MIME media type string, e.g. ``"text/markdown"`` or
+            ``"application/pdf"``.
+
+    Returns:
+        ``True`` if the type is text-decodable; ``False`` otherwise.
+    """
+    if media_type.startswith("text/"):
+        return True
+    return media_type in {
+        "application/x-ipynb+json",
+        "application/json",
+        "application/jsonlines",
+        "application/toml",
+        # application/xml is intentionally text-decodable: RFC 7303 specifies
+        # UTF-8 (or UTF-16) as the default encoding, so XML bytes round-trip
+        # faithfully as text and do not need binary handling.
+        "application/xml",
+    }
+
+
 def resolve_media_type_with_hint(uri: str) -> tuple[str, str]:
     """Return ``(media_type, parser_hint)`` for the given URI.
 

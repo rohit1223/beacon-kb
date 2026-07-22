@@ -444,6 +444,17 @@ class TestMediaTypeResolution:
             f"Unexpected hint {hint!r} for {media_type!r}; expected plaintext or binary"
         )
 
+    def test_application_xml_is_text_decodable(self) -> None:
+        """application/xml must be classified as text-decodable.
+
+        RFC 7303 specifies UTF-8 (or UTF-16) as the default XML encoding, so
+        XML content round-trips faithfully as text and does not need binary
+        handling.
+        """
+        from beacon_kb.ingestion.media import is_text_media_type
+
+        assert is_text_media_type("application/xml") is True
+
 
 # ---------------------------------------------------------------------------
 # FilesystemConnector: binary and undecodable file handling

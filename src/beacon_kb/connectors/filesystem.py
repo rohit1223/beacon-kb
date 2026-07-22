@@ -27,7 +27,7 @@ import urllib.request
 
 from beacon_kb.errors import IngestionError
 from beacon_kb.ingestion.identity import make_file_source_uri
-from beacon_kb.ingestion.media import resolve_media_type
+from beacon_kb.ingestion.media import is_text_media_type, resolve_media_type
 from beacon_kb.models import (
     RawDocument,
     SourceId,
@@ -149,13 +149,7 @@ class FilesystemConnector:
         # Binary types (application/octet-stream, application/pdf, image/*, etc.)
         # are not decodable as text and must be rejected with a clear error rather
         # than silently mangled by an errors="replace" fallback.
-        _text_type = media_type.startswith("text/") or media_type in (
-            "application/x-ipynb+json",
-            "application/json",
-            "application/jsonlines",
-            "application/toml",
-        )
-        if not _text_type:
+        if not is_text_media_type(media_type):
             raise IngestionError(
                 f"FilesystemConnector.fetch: binary or non-text media type "
                 f"{media_type!r} for URI {uri!r}; text decoding is not supported "
