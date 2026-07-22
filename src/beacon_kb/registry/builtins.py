@@ -42,6 +42,48 @@ def _register_builtins() -> None:
     #       instance=SQLiteStore(db_path="/path/to/kb.db", vector_dim=768),
     #   )
 
+    # RETRIEVERS: no built-in default is registered.
+    # Both BM25SparseRetriever and EmbedderDenseRetriever require a concrete
+    # SQLiteStore at construction time.  Registering them bound to a throwaway
+    # ``:memory:`` / 16-dim store would silently yield an isolated in-memory
+    # instance with the wrong dimension when resolved - the same footgun as the
+    # store itself.  We leave the group empty so resolve() raises PluginNotFound.
+    # Callers construct a real store first, then build and register the retrievers:
+    #
+    #   from beacon_kb.storage.sqlite import SQLiteStore
+    #   from beacon_kb.retrieval.sparse import BM25SparseRetriever
+    #   from beacon_kb.retrieval.dense import EmbedderDenseRetriever
+    #   from beacon_kb.registry import precedence, groups
+    #
+    #   store = SQLiteStore(db_path="/path/to/kb.db", vector_dim=768)
+    #   precedence.register(
+    #       group=groups.RETRIEVERS,
+    #       name="bm25",
+    #       instance=BM25SparseRetriever(store=store),
+    #   )
+    #   precedence.register(
+    #       group=groups.RETRIEVERS,
+    #       name="dense",
+    #       instance=EmbedderDenseRetriever(store=store, embedder=my_embedder, similarity="cosine"),
+    #   )
+    #
+    # Note: resolving a dense retriever requires ``protocol=DenseRetriever`` explicitly
+    # because the group's canonical protocol is SparseRetriever.  This documented
+    # escape hatch bypasses the automatic SparseRetriever check:
+    #   registry.resolve(groups.RETRIEVERS, "dense", protocol=DenseRetriever)
+
+    # FUSION: RRFusion is the built-in rank-based fusion strategy.
+    # Registered via register_builtin() so third-party 'rrf' entry-point plugins
+    # can override it via the explicit registration path (higher precedence).
+    # RRFusion is stateless and safe to register as a default.
+    from beacon_kb.retrieval.fusion import RRFusion
+
+    precedence.register_builtin(
+        group=groups.FUSION,
+        name="rrf",
+        instance=RRFusion(),
+    )
+
     # CONNECTORS: Register first-party connectors.
     # Import is deferred to avoid circular imports at module load time.
     from beacon_kb.connectors.memory import MemoryConnector
