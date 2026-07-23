@@ -5,6 +5,7 @@ Each entry records what is missing, why it was deferred, and which epic will add
 
 ## Deferred items
 
+- [TASK 02.3] PDF CI gate: CI pipeline must pre-download Docling layout and table model artifacts into the model cache, set BEACON_PDF_MODELS_AVAILABLE=1 environment variable, and run pytest so the two guarded PDF tests in tests/beacon/integration/test_parsing.py execute; this confirms offline parsing (Markdown, HTML, DOCX) and validates PDF conversion once models are available.
 - [DONE - Task 03.1.3] Query.top_k vs config.retrieval.top_k reconciliation - per-query top_k overrides config when it differs from the default (10); documented in pipeline.py at _resolve_top_k().
 - StopCondition trace parameter typing to AgenticTrace - the current `Any` annotation should be narrowed once the contract suite and fakes feed real AgenticTrace values instead of None/dict placeholders (Epic 04).
 - Entry-point scan caching per group if hot - avoid repeated metadata scans in tight loops once Epic 02 introduces high-frequency resolution (Epic 02).
