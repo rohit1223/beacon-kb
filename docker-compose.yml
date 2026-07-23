@@ -1,0 +1,78 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Beacon API server
+  # ---------------------------------------------------------------------------
+  beacon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: beacon-kb:latest
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      # State database - persisted on the beacon-data volume.
+      BEACON_STATE__DB_PATH: /data/beacon.db
+      # Qdrant server mode: point at the qdrant service by service name.
+      # When BEACON_QDRANT__URL is set, embedded mode is disabled.
+      BEACON_QDRANT__URL: http://qdrant:6333
+      # Server binding.
+      BEACON_SERVER__HOST: "0.0.0.0"
+      BEACON_SERVER__PORT: "8000"
+      # Optional: uncomment and set to enable API-key authentication.
+      # BEACON_SERVER__API_KEY: "${BEACON_API_KEY}"
+      # Optional: uncomment and set for a remote Qdrant instance with auth.
+      # BEACON_QDRANT__API_KEY: "${QDRANT_API_KEY}"
+      # Optional: uncomment and configure an LLM API key for the answer pipeline.
+      # BEACON_MODELS__LLM_API_KEY: "${LLM_API_KEY}"
+    volumes:
+      - beacon-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Qdrant vector store
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.18.0
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c",
+             "echo > /dev/tcp/localhost/6333"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Ollama (optional local-LLM backend) - profile: ollama
+  # Activate with: docker compose --profile ollama up
+  # Epic 04 wires model auto-detect to this service for local LLM inference.
+  # ---------------------------------------------------------------------------
+  ollama:
+    profiles:
+      - ollama
+    image: ollama/ollama:0.6.5
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  beacon-data:
+    driver: local
+  qdrant-data:
+    driver: local
+  ollama-data:
+    driver: local

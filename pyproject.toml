@@ -55,6 +55,26 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "build>=1.2",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "httpx2>=2.7.0",  # Starlette TestClient httpx2 support for improved HTTP testing
+]
+# Server stack for the Beacon v2 rebuild.
+# This group is additive: installing without it leaves beacon_kb working unchanged.
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic-settings>=2.4",
+    "qdrant-client>=1.12",
+    "llama-index-core>=0.12",
+    "llama-index-readers-file>=0.4",
+    "llama-index-embeddings-litellm>=0.3",
+    "docling>=2.5",
+    "litellm>=1.50",
+    "langgraph>=1.0",
+    "typer>=0.12",
+    "fastmcp>=2.0",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
@@ -95,6 +115,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 beacon_kb = ["py.typed"]
+beacon = ["py.typed"]
 
 [tool.setuptools.dynamic]
 version = {attr = "beacon_kb.version.__version__"}
@@ -134,6 +155,7 @@ ignore = [
 "src/beacon_kb/registry/precedence.py" = ["ANN401", "S110"]  # Any for dynamic plugin objects; S110 for silent metadata fallback
 "src/beacon_kb/registry/groups.py" = ["S105"]  # S105 false-positive: TOKEN_COUNTERS is a group name string, not a password
 "src/beacon_kb/parsing/html.py" = ["ANN401"]  # Any is intentional for BeautifulSoup Tag/element params where bs4 is an optional deferred import
+"src/beacon/config.py" = ["ANN401"]  # Any is intentional in safe_dump for generic dict construction
 
 [tool.mypy]
 # No python_version pin: mypy checks against the running interpreter so the
@@ -143,7 +165,7 @@ ignore = [
 # The 3.11 syntax floor for our own code is enforced by ruff target-version;
 # requires-python stays ">=3.11" per the implementation plan.
 strict = true
-files = ["src"]
+files = ["src", "tests/beacon"]
 namespace_packages = true
 explicit_package_bases = true
 mypy_path = "src"
@@ -160,11 +182,15 @@ markers = [
     "evaluation: RAG evaluation and quality-metric tests",
     "performance: Latency and throughput benchmarks",
 ]
+filterwarnings = [
+    "ignore:Failed to obtain server version.*:UserWarning",
+    "ignore:Payload indexes have no effect in the local Qdrant.*:UserWarning",
+]
 
 [tool.coverage.run]
-source = ["src/beacon_kb"]
+source = ["src/beacon_kb", "src/beacon"]
 branch = true
-omit = ["src/beacon_kb/py.typed"]
+omit = ["src/beacon_kb/py.typed", "src/beacon/py.typed"]
 
 [tool.coverage.report]
 show_missing = true
