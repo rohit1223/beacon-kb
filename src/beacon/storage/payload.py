@@ -20,10 +20,34 @@ scans.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from qdrant_client.http.models import PayloadSchemaType
+
+# ---------------------------------------------------------------------------
+# Chunk-to-point ID conversion
+# ---------------------------------------------------------------------------
+
+
+def chunk_id_to_point_id(chunk_id: str) -> str:
+    """Convert a 64-char hex chunk_id to a Qdrant point ID (UUID string).
+
+    The UUID is derived from the first 32 hex characters (128 bits) of the
+    SHA-256 chunk identifier.  This conversion is the single source of truth
+    shared by the sync engine (write path, Epic 02) and the retrieval layer
+    (read path, Epic 03): both sides must derive identical point IDs for the
+    same chunk so reads and carryover copies address the points the engine
+    wrote.
+
+    Args:
+        chunk_id: 64-character hex SHA-256 chunk identifier.
+
+    Returns:
+        UUID string derived from the first 32 hex chars.
+    """
+    return str(uuid.UUID(chunk_id[:32]))
 
 # ---------------------------------------------------------------------------
 # Named-vector constants
@@ -42,6 +66,7 @@ SPARSE_VECTOR_NAME: str = "sparse"
 PAYLOAD_INDEX_FIELDS: list[tuple[str, PayloadSchemaType]] = [
     ("source_uri", PayloadSchemaType.KEYWORD),
     ("tags", PayloadSchemaType.KEYWORD),
+    ("kind", PayloadSchemaType.KEYWORD),
     ("ingested_at", PayloadSchemaType.DATETIME),
     ("created_at", PayloadSchemaType.DATETIME),
     ("modified_at", PayloadSchemaType.DATETIME),
@@ -69,6 +94,13 @@ class ChunkPayload:
     ``parent_chunk_id`` is ``None`` for top-level chunks and carries the
     ``str`` UUID of the parent for child chunks (LlamaIndex hierarchical
     nodes).
+
+    ``kind`` and ``section_kind`` store the string values of ``ChunkKind``
+    and ``SectionKind`` respectively (e.g. ``"parent"``/``"child"`` and
+    ``"text"``/``"code"``/``"table"``/``"list"``).
+
+    ``prev_chunk_id`` and ``next_chunk_id`` carry neighbor links within the
+    same section; both are ``None`` for parents and for terminal children.
     """
 
     chunk_text: str
@@ -80,9 +112,13 @@ class ChunkPayload:
     content_hash: str
     chunk_hash: str
     fingerprint: str
+    kind: str
+    section_kind: str
     created_at: str | None = None
     modified_at: str | None = None
     parent_chunk_id: str | None = None
+    prev_chunk_id: str | None = None
+    next_chunk_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain dict suitable for use as a Qdrant point payload."""
@@ -99,4 +135,8 @@ class ChunkPayload:
             "chunk_hash": self.chunk_hash,
             "parent_chunk_id": self.parent_chunk_id,
             "fingerprint": self.fingerprint,
+            "kind": self.kind,
+            "section_kind": self.section_kind,
+            "prev_chunk_id": self.prev_chunk_id,
+            "next_chunk_id": self.next_chunk_id,
         }

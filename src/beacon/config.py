@@ -152,6 +152,21 @@ class InvestigateSettings(BaseModel):
     """Whether to persist loop state to the SQLite state DB for resume on failure."""
 
 
+class IngestSettings(BaseModel):
+    """Ingestion pipeline configuration."""
+
+    data_dir: str = Field(default_factory=lambda: "data")
+    """Root directory for connector data and uploaded files.
+
+    Uploaded documents are stored under ``<data_dir>/uploads/<hash_prefix>/<hash>/``.
+    """
+
+    max_upload_bytes: int = 50 * 1024 * 1024  # 50 MiB
+    """Maximum allowed upload size in bytes. Requests exceeding this are
+    rejected with a 413 problem-details response without buffering the body.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Root settings
 # ---------------------------------------------------------------------------
@@ -186,6 +201,7 @@ class BeaconSettings(BaseSettings):
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     answer: AnswerSettings = Field(default_factory=AnswerSettings)
     investigate: InvestigateSettings = Field(default_factory=InvestigateSettings)
+    ingest: IngestSettings = Field(default_factory=IngestSettings)
 
     def __repr__(self) -> str:
         return (
@@ -196,7 +212,8 @@ class BeaconSettings(BaseSettings):
             f"models={self.models!r}, "
             f"retrieval={self.retrieval!r}, "
             f"answer={self.answer!r}, "
-            f"investigate={self.investigate!r})"
+            f"investigate={self.investigate!r}, "
+            f"ingest={self.ingest!r})"
         )
 
     def safe_dump(self) -> dict[str, Any]:
@@ -242,5 +259,9 @@ class BeaconSettings(BaseSettings):
                 "max_iterations": self.investigate.max_iterations,
                 "max_cost_usd": self.investigate.max_cost_usd,
                 "enable_checkpointing": self.investigate.enable_checkpointing,
+            },
+            "ingest": {
+                "data_dir": self.ingest.data_dir,
+                "max_upload_bytes": self.ingest.max_upload_bytes,
             },
         }

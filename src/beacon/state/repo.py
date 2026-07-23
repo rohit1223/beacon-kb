@@ -205,38 +205,55 @@ class SourceRepo:
         canonical_uri: str,
         connector_kind: str = "",
         content_hash: str = "",
+        media_type: str | None = None,
+        config_json: str | None = None,
+        is_connector_definition: bool = False,
     ) -> None:
         """Create or update a source record.
 
         If the source already exists its ``content_hash``, ``connector_kind``,
+        ``media_type``, ``config_json``, ``is_connector_definition``,
         ``status`` (reset to ACTIVE), and ``updated_at`` are updated.
 
         Args:
             collection_name: Owning collection name.
             canonical_uri:   Unique canonical URI for this source.
-            connector_kind:  Connector type string (e.g. 'folder', 'web').
+            connector_kind:  Connector type string (e.g. 'folder', 'upload').
             content_hash:    SHA-256 of the raw content for dedupe.
+            media_type:      MIME type for upload sources; None for connector-backed sources.
+            config_json:     JSON-serialized connector config for definition rows;
+                             None for content-source rows.
+            is_connector_definition:
+                             True when this row is a connector definition attached
+                             via POST /collections/{name}/sources; False for
+                             content sources discovered by the sync engine.
 
         Raises:
             BackendError: On SQLite write failure.
         """
         now = _now_iso()
+        is_def_int = 1 if is_connector_definition else 0
         try:
             self._conn.execute("BEGIN")
             self._conn.execute(
                 """
                 INSERT INTO sources
                     (collection_name, canonical_uri, connector_kind, content_hash,
-                     status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     status, media_type, config_json, is_connector_definition,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(collection_name, canonical_uri) DO UPDATE SET
-                    connector_kind = excluded.connector_kind,
-                    content_hash   = excluded.content_hash,
-                    status         = 'active',
-                    updated_at     = excluded.updated_at
+                    connector_kind          = excluded.connector_kind,
+                    content_hash            = excluded.content_hash,
+                    media_type              = excluded.media_type,
+                    config_json             = excluded.config_json,
+                    is_connector_definition = excluded.is_connector_definition,
+                    status                  = 'active',
+                    updated_at              = excluded.updated_at
                 """,
                 (collection_name, canonical_uri, connector_kind, content_hash,
-                 SourceStatus.ACTIVE, now, now),
+                 SourceStatus.ACTIVE, media_type, config_json, is_def_int,
+                 now, now),
             )
             self._conn.execute("COMMIT")
         except sqlite3.Error as exc:
@@ -292,11 +309,20 @@ class SourceRepo:
         except sqlite3.Error as exc:
             raise BackendError(f"SourceRepo.get failed: {exc}") from exc
 
-    def list_active(self, *, collection_name: str) -> list[sqlite3.Row]:
+    def list_active(
+        self,
+        *,
+        collection_name: str,
+        exclude_definitions: bool = True,
+    ) -> list[sqlite3.Row]:
         """Return all ACTIVE source rows for *collection_name*.
 
         Args:
-            collection_name: Owning collection name.
+            collection_name:     Owning collection name.
+            exclude_definitions: When True (default), exclude connector-definition
+                                 rows (is_connector_definition = 1) so change
+                                 planning only sees content sources.  Pass False
+                                 to include definition rows.
 
         Returns:
             List of sqlite3.Row records with status = ACTIVE.
@@ -305,12 +331,57 @@ class SourceRepo:
             BackendError: On I/O failure.
         """
         try:
+            if exclude_definitions:
+                return self._conn.execute(
+                    """
+                    SELECT * FROM sources
+                    WHERE collection_name = ? AND status = ?
+                      AND is_connector_definition = 0
+                    """,
+                    (collection_name, SourceStatus.ACTIVE),
+                ).fetchall()
             return self._conn.execute(
                 "SELECT * FROM sources WHERE collection_name = ? AND status = ?",
                 (collection_name, SourceStatus.ACTIVE),
             ).fetchall()
         except sqlite3.Error as exc:
             raise BackendError(f"SourceRepo.list_active failed: {exc}") from exc
+
+    def list_connector_definitions(
+        self,
+        *,
+        collection_name: str,
+    ) -> list[sqlite3.Row]:
+        """Return all connector-definition rows for *collection_name*.
+
+        Definition rows are inserted by POST /collections/{name}/sources and
+        carry the connector kind plus its config as ``config_json``.  The sync
+        trigger route reads these rows to decide which connector to run.
+
+        Args:
+            collection_name: Owning collection name.
+
+        Returns:
+            List of sqlite3.Row records with is_connector_definition = 1,
+            ordered by id for deterministic selection.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            return self._conn.execute(
+                """
+                SELECT * FROM sources
+                WHERE collection_name = ? AND is_connector_definition = 1
+                  AND status = ?
+                ORDER BY id
+                """,
+                (collection_name, SourceStatus.ACTIVE),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise BackendError(
+                f"SourceRepo.list_connector_definitions failed: {exc}"
+            ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -340,15 +411,17 @@ class RevisionRepo:
         fingerprint: str = "",
         chunk_count: int = 0,
         source_count: int = 0,
+        physical_collection: str | None = None,
     ) -> None:
         """Insert a new STAGED revision record.
 
         Args:
-            revision_id:     Unique revision identifier.
-            collection_name: Owning collection name.
-            fingerprint:     Combined pipeline + content hash.
-            chunk_count:     Number of chunks in this revision (0 until set_live).
-            source_count:    Number of sources in this revision.
+            revision_id:          Unique revision identifier.
+            collection_name:      Owning collection name.
+            fingerprint:          Combined pipeline + content hash.
+            chunk_count:          Number of chunks in this revision (0 until set_live).
+            source_count:         Number of sources in this revision.
+            physical_collection:  Name of the Qdrant shadow collection for this revision.
 
         Raises:
             BackendError: On SQLite write failure.
@@ -360,12 +433,12 @@ class RevisionRepo:
                 """
                 INSERT INTO revisions
                     (revision_id, collection_name, fingerprint, status,
-                     chunk_count, source_count, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     chunk_count, source_count, physical_collection, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(revision_id) DO NOTHING
                 """,
                 (revision_id, collection_name, fingerprint, RevisionStatus.STAGED,
-                 chunk_count, source_count, now, now),
+                 chunk_count, source_count, physical_collection, now, now),
             )
             self._conn.execute("COMMIT")
         except sqlite3.Error as exc:
@@ -537,7 +610,14 @@ class SyncJobRepo:
         try:
             self._conn.execute("BEGIN")
             self._conn.execute(
-                "UPDATE sync_jobs SET state = ?, started_at = ? WHERE job_id = ?",
+                """
+                UPDATE sync_jobs SET
+                    state        = ?,
+                    started_at   = ?,
+                    error_detail = NULL,
+                    finished_at  = NULL
+                WHERE job_id = ?
+                """,
                 (SyncJobState.RUNNING, _now_iso(), job_id),
             )
             self._conn.execute("COMMIT")
@@ -571,6 +651,7 @@ class SyncJobRepo:
                 UPDATE sync_jobs SET
                     state             = ?,
                     finished_at       = ?,
+                    error_detail      = NULL,
                     sources_added     = ?,
                     sources_removed   = ?,
                     sources_unchanged = ?
@@ -623,52 +704,102 @@ class SyncJobRepo:
             _rollback(self._conn)
             raise BackendError(f"SyncJobRepo.set_failed failed: {exc}") from exc
 
-    def fail_stale_running(self, collection_name: str | None = None) -> int:
-        """Mark all RUNNING jobs as FAILED with a stale-process reason.
+    def fail_stale_running(
+        self,
+        collection_name: str | None = None,
+        *,
+        exclude_job_id: str | None = None,
+    ) -> int:
+        """Mark all RUNNING and PENDING jobs as FAILED with a stale-process reason.
 
-        RUNNING jobs cannot survive a process restart: the sync engine that
-        started them is no longer alive. This method is called at startup and
-        at the beginning of each sync to clean up stale state before any new
-        work begins.
+        RUNNING and PENDING jobs cannot survive a process restart: the sync
+        engine that started or was about to start them is no longer alive.
+        PENDING jobs are stale too - they were created just before a crash and
+        will never be picked up by the background worker that died.
+
+        This method is called at startup (once, across all collections) to
+        drain all stale in-flight state before any new requests arrive, and at
+        the beginning of each per-collection sync to clean up any stragglers
+        missed by the startup sweep.
 
         Args:
             collection_name: When provided, restrict reaping to this collection.
-                When None, reap stale RUNNING jobs across all collections.
+                When None, reap stale RUNNING and PENDING jobs across all
+                collections (startup sweep).
+            exclude_job_id: When provided, skip this specific job ID so that a
+                caller does not reap its own just-created PENDING job.
 
         Returns:
-            The number of jobs transitioned from RUNNING to FAILED.
+            The number of jobs transitioned to FAILED.
 
         Raises:
             BackendError: On SQLite write failure.
         """
         reason = json.dumps(
-            {"type": "stale", "message": "Job was RUNNING at process start; presumed dead."}
+            {
+                "type": "stale",
+                "message": (
+                    "Job was RUNNING or PENDING at process start; presumed dead."
+                ),
+            }
         )
         now = _now_iso()
+        stale_states = (SyncJobState.RUNNING, SyncJobState.PENDING)
         try:
             self._conn.execute("BEGIN")
             if collection_name is not None:
-                cursor = self._conn.execute(
-                    """
-                    UPDATE sync_jobs SET
-                        state        = ?,
-                        finished_at  = ?,
-                        error_detail = ?
-                    WHERE state = ? AND collection_name = ?
-                    """,
-                    (SyncJobState.FAILED, now, reason, SyncJobState.RUNNING, collection_name),
-                )
+                if exclude_job_id is not None:
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE sync_jobs SET
+                            state        = ?,
+                            finished_at  = ?,
+                            error_detail = ?
+                        WHERE state IN (?, ?) AND collection_name = ? AND job_id != ?
+                        """,
+                        (
+                            SyncJobState.FAILED,
+                            now,
+                            reason,
+                            *stale_states,
+                            collection_name,
+                            exclude_job_id,
+                        ),
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE sync_jobs SET
+                            state        = ?,
+                            finished_at  = ?,
+                            error_detail = ?
+                        WHERE state IN (?, ?) AND collection_name = ?
+                        """,
+                        (SyncJobState.FAILED, now, reason, *stale_states, collection_name),
+                    )
             else:
-                cursor = self._conn.execute(
-                    """
-                    UPDATE sync_jobs SET
-                        state        = ?,
-                        finished_at  = ?,
-                        error_detail = ?
-                    WHERE state = ?
-                    """,
-                    (SyncJobState.FAILED, now, reason, SyncJobState.RUNNING),
-                )
+                if exclude_job_id is not None:
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE sync_jobs SET
+                            state        = ?,
+                            finished_at  = ?,
+                            error_detail = ?
+                        WHERE state IN (?, ?) AND job_id != ?
+                        """,
+                        (SyncJobState.FAILED, now, reason, *stale_states, exclude_job_id),
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        """
+                        UPDATE sync_jobs SET
+                            state        = ?,
+                            finished_at  = ?,
+                            error_detail = ?
+                        WHERE state IN (?, ?)
+                        """,
+                        (SyncJobState.FAILED, now, reason, *stale_states),
+                    )
             count = cursor.rowcount
             self._conn.execute("COMMIT")
             return count
@@ -696,6 +827,37 @@ class SyncJobRepo:
             )
         except sqlite3.Error as exc:
             raise BackendError(f"SyncJobRepo.get failed: {exc}") from exc
+
+    def get_active(self, collection_name: str) -> sqlite3.Row | None:
+        """Return a PENDING or RUNNING job for *collection_name*, or None.
+
+        Used by the sync trigger route to detect concurrent syncs and respond
+        with 409 Conflict before creating a second job.
+
+        Args:
+            collection_name: Owning collection name.
+
+        Returns:
+            sqlite3.Row for the active job, or None if none exists.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            return _fetchone(
+                self._conn.execute(
+                    """
+                    SELECT * FROM sync_jobs
+                    WHERE collection_name = ?
+                      AND state IN ('pending', 'running')
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (collection_name,),
+                )
+            )
+        except sqlite3.Error as exc:
+            raise BackendError(f"SyncJobRepo.get_active failed: {exc}") from exc
 
     def list_by_collection(self, collection_name: str) -> list[sqlite3.Row]:
         """Return all sync jobs for *collection_name*, ordered by created_at desc.

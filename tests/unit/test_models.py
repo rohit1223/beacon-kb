@@ -24,10 +24,32 @@ import pytest
 
 
 def _fresh_import(name: str) -> Any:
-    for key in list(sys.modules):
-        if key == name or key.startswith(name + "."):
-            del sys.modules[key]
-    return importlib.import_module(name)
+    """Import *name* freshly, then restore the original sys.modules entries.
+
+    The eviction forces a genuine re-import so import-time side effects run
+    again and are observable.  Restoring the saved entries afterwards is
+    load-bearing: without it the freshly-imported module permanently replaces
+    the shared one in sys.modules, so later tests mix class objects from the
+    old and new module instances and isinstance()/except checks silently fail
+    (e.g. Evidence identity in tests/integration/test_grounded_answer.py and
+    IngestionError catching in tests/integration/test_corpus_health.py).
+    """
+    saved: dict[str, Any] = {
+        key: mod
+        for key, mod in sys.modules.items()
+        if key == name or key.startswith(name + ".")
+    }
+    for key in saved:
+        del sys.modules[key]
+    try:
+        return importlib.import_module(name)
+    finally:
+        # Drop modules registered by the fresh import, then restore the
+        # originals so class identity is preserved for every other test.
+        for key in list(sys.modules):
+            if key == name or key.startswith(name + "."):
+                del sys.modules[key]
+        sys.modules.update(saved)
 
 
 # ===========================================================================

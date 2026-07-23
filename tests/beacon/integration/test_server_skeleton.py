@@ -171,15 +171,33 @@ class TestReadyz:
         assert body["collections"]["docs"] == CorpusState.READY
 
     def test_readyz_reports_building_state(self, tmp_path: Any) -> None:
-        """A collection with a running sync job reports as building."""
-        s = _settings(tmp_path)
-        db = StateDB(db_path=s.state.db_path)
-        CollectionRepo(db).create(name="docs")
-        SyncJobRepo(db).create(job_id="job1", collection_name="docs")
-        SyncJobRepo(db).set_running("job1")
-        db.close()
+        """A collection with a running sync job reports as building.
 
-        with _client(s) as c:
+        The RUNNING job must be injected AFTER the app has started so that
+        the startup stale-job sweep (which reaps RUNNING and PENDING jobs)
+        does not immediately transition it to FAILED before the readyz call.
+        A separate DB connection (same file path, opened from the test thread)
+        is used to insert the job after the app's lifespan startup has run.
+        """
+        s = _settings(tmp_path)
+        # Create the collection before startup so it exists when readyz runs.
+        pre_db = StateDB(db_path=s.state.db_path)
+        CollectionRepo(pre_db).create(name="docs")
+        pre_db.close()
+
+        app = create_app(s)
+        with TestClient(app, raise_server_exceptions=False) as c:
+            # Open a fresh connection from the test thread (the app's connection
+            # is owned by a different thread and cannot be shared across threads).
+            # Inserting AFTER startup ensures the stale-job sweep does not reap
+            # this job before readyz is called.
+            post_db = StateDB(db_path=s.state.db_path)
+            try:
+                SyncJobRepo(post_db).create(job_id="job1", collection_name="docs")
+                SyncJobRepo(post_db).set_running("job1")
+            finally:
+                post_db.close()
+
             r = c.get("/readyz")
         assert r.status_code == 200
         body = r.json()

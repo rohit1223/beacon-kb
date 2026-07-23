@@ -95,6 +95,7 @@ class TestSourceRepo:
     def test_upsert_and_get(self, tmp_path: Any) -> None:
         """Upserting a source and reading it back returns the expected fields."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",
@@ -113,6 +114,7 @@ class TestSourceRepo:
     def test_update_content_hash(self, tmp_path: Any) -> None:
         """Upserting an existing source updates content_hash and connector_kind."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",
@@ -134,6 +136,7 @@ class TestSourceRepo:
     def test_retire_source(self, tmp_path: Any) -> None:
         """Retiring a source transitions its status to RETIRED."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",
@@ -150,6 +153,7 @@ class TestSourceRepo:
     def test_list_active(self, tmp_path: Any) -> None:
         """Listing active sources excludes retired ones."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",
@@ -356,6 +360,7 @@ class TestSyncJobRepo:
         assert row is not None
         assert row["state"] == SyncJobState.SUCCEEDED
         assert row["finished_at"] is not None
+        assert row["error_detail"] is None
         assert row["sources_added"] == 3
         assert row["sources_removed"] == 1
         assert row["sources_unchanged"] == 10
@@ -418,7 +423,13 @@ class TestSyncJobRepo:
         assert row["sources_added"] == 5
 
     def test_fail_stale_running_marks_running_jobs_failed(self, tmp_path: Any) -> None:
-        """fail_stale_running transitions all RUNNING jobs to FAILED."""
+        """fail_stale_running transitions RUNNING and PENDING jobs to FAILED.
+
+        Both states are stale at startup - neither can survive a process
+        restart.  RUNNING jobs had a live engine that is now dead; PENDING
+        jobs were created just before a crash and their background worker was
+        never scheduled (or died before picking them up).
+        """
         db = _open(tmp_path)
         repo = SyncJobRepo(db)
         repo.create(job_id="j-run-1", collection_name="docs")
@@ -428,7 +439,7 @@ class TestSyncJobRepo:
         repo.create(job_id="j-pending", collection_name="docs")
 
         count = repo.fail_stale_running()
-        assert count == 2
+        assert count == 3  # RUNNING x2 + PENDING x1
 
         r1 = repo.get("j-run-1")
         r2 = repo.get("j-run-2")
@@ -436,7 +447,7 @@ class TestSyncJobRepo:
         db.close()
         assert r1 is not None and r1["state"] == SyncJobState.FAILED
         assert r2 is not None and r2["state"] == SyncJobState.FAILED
-        assert r3 is not None and r3["state"] == SyncJobState.PENDING
+        assert r3 is not None and r3["state"] == SyncJobState.FAILED
         # Error detail must explain the reason.
         detail = json.loads(r1["error_detail"])
         assert detail["type"] == "stale"
@@ -458,6 +469,40 @@ class TestSyncJobRepo:
         db.close()
         assert ra is not None and ra["state"] == SyncJobState.FAILED
         assert rb is not None and rb["state"] == SyncJobState.RUNNING
+
+    def test_fail_stale_running_exclude_job_id_own_job_survives(
+        self, tmp_path: Any
+    ) -> None:
+        """exclude_job_id prevents the caller's own PENDING job from being reaped.
+
+        Scenario mirrors the engine's per-collection call: a new PENDING job is
+        created, then fail_stale_running is called with that job's id excluded.
+        The new job must survive while other stale jobs in the same collection
+        are reaped.
+        """
+        db = _open(tmp_path)
+        repo = SyncJobRepo(db)
+
+        # A stale RUNNING job from a previous cycle.
+        repo.create(job_id="j-stale", collection_name="docs")
+        repo.set_running("j-stale")
+
+        # The caller's own fresh PENDING job.
+        repo.create(job_id="j-own", collection_name="docs")
+
+        count = repo.fail_stale_running(
+            collection_name="docs", exclude_job_id="j-own"
+        )
+
+        j_stale = repo.get("j-stale")
+        j_own = repo.get("j-own")
+        db.close()
+
+        # Only the stale job should be reaped.
+        assert count == 1
+        assert j_stale is not None and j_stale["state"] == SyncJobState.FAILED
+        # The caller's own job must still be PENDING, unharmed.
+        assert j_own is not None and j_own["state"] == SyncJobState.PENDING
 
 
 # ---------------------------------------------------------------------------
