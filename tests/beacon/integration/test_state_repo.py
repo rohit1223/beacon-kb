@@ -95,6 +95,7 @@ class TestSourceRepo:
     def test_upsert_and_get(self, tmp_path: Any) -> None:
         """Upserting a source and reading it back returns the expected fields."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",
@@ -113,6 +114,7 @@ class TestSourceRepo:
     def test_update_content_hash(self, tmp_path: Any) -> None:
         """Upserting an existing source updates content_hash and connector_kind."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",
@@ -134,6 +136,7 @@ class TestSourceRepo:
     def test_retire_source(self, tmp_path: Any) -> None:
         """Retiring a source transitions its status to RETIRED."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",
@@ -150,6 +153,7 @@ class TestSourceRepo:
     def test_list_active(self, tmp_path: Any) -> None:
         """Listing active sources excludes retired ones."""
         db = _open(tmp_path)
+        CollectionRepo(db).create(name="docs")
         repo = SourceRepo(db)
         repo.upsert(
             collection_name="docs",

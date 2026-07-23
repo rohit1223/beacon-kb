@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from beacon.config import BeaconSettings
 from beacon.server.error_handlers import register_error_handlers
 from beacon.server.routes.collections import router as collections_router
+from beacon.server.routes.documents import router as documents_router
 from beacon.server.routes.health import router as health_router
 from beacon.server.telemetry import instrument_app
 
@@ -123,6 +124,7 @@ def create_app(settings: BeaconSettings | None = None) -> FastAPI:
     # Mount route routers.
     app.include_router(health_router)
     app.include_router(collections_router)
+    app.include_router(documents_router)
 
     # Wire up OTel instrumentation (no-op when OTel not configured).
     instrument_app(app, settings=settings)

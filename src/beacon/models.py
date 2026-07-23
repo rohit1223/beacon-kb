@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Collection name validation
@@ -115,3 +115,89 @@ class CollectionListResponse(BaseModel):
 
 # Rebuild models to resolve forward references (LastJobSummary used in CollectionResponse).
 CollectionResponse.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Ingestion request/response models (Task 02.1)
+# ---------------------------------------------------------------------------
+
+
+class SourceAttachRequest(BaseModel):
+    """Request body for POST /collections/{name}/sources."""
+
+    connector_kind: str
+    """Connector type. Must be one of the registered kinds (folder, upload, web)."""
+
+    config: dict[str, str] = Field(default_factory=dict)
+    """Connector-specific configuration key-value pairs.
+
+    For ``folder`` connectors: ``root`` (required), ``include_globs`` (optional,
+    comma-separated glob patterns reconstructed by Task 02.5 as a list),
+    ``exclude_globs`` (optional, comma-separated).
+    List-valued fields use comma-separation as the wire format; Task 02.5
+    will split on commas to reconstruct the list for FolderConnector.
+    For ``upload`` connectors: no required keys; the URI is resolved from the
+    content hash set by the upload route.
+    """
+
+    @field_validator("connector_kind")
+    @classmethod
+    def validate_connector_kind(cls, v: str) -> str:
+        """Reject unknown connector kinds with a typed validation error."""
+        from beacon.ingest.connectors import get_connector_kinds
+
+        allowed = get_connector_kinds()
+        if v not in allowed:
+            raise ValueError(
+                f"Unknown connector kind {v!r}. "
+                f"Allowed values: {sorted(allowed)!r}."
+            )
+        return v
+
+
+class SourceResponse(BaseModel):
+    """Response body for a single source record."""
+
+    id: int
+    """Row ID in the state DB sources table."""
+
+    collection_name: str
+    """Owning logical collection name."""
+
+    canonical_uri: str
+    """Stable canonical URI identifying this source (file://, upload://, https://)."""
+
+    connector_kind: str
+    """Connector type that produced this source."""
+
+    content_hash: str
+    """Hex-encoded SHA-256 of the last fetched content. Empty string before first fetch."""
+
+    status: str
+    """Source lifecycle status: active | retired."""
+
+    created_at: str
+    """UTC ISO 8601 timestamp when the source was first registered."""
+
+    media_type: str | None = None
+    """MIME type for upload sources (e.g. 'text/markdown'). None for connector-backed sources."""
+
+
+class DocumentUploadResponse(BaseModel):
+    """Response body for POST /documents."""
+
+    source_id: int
+    """Row ID of the source record in the state DB."""
+
+    canonical_uri: str
+    """Content-addressed canonical URI for this upload (``upload://<sha256>``)."""
+
+    content_hash: str
+    """Hex-encoded SHA-256 of the uploaded bytes."""
+
+    stored: bool
+    """True if the bytes were written to disk on this request; False if this
+    content hash was already stored (deduplicated)."""
+
+    media_type: str
+    """Detected media type for the uploaded file."""

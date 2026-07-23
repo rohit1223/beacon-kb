@@ -205,17 +205,19 @@ class SourceRepo:
         canonical_uri: str,
         connector_kind: str = "",
         content_hash: str = "",
+        media_type: str | None = None,
     ) -> None:
         """Create or update a source record.
 
         If the source already exists its ``content_hash``, ``connector_kind``,
-        ``status`` (reset to ACTIVE), and ``updated_at`` are updated.
+        ``media_type``, ``status`` (reset to ACTIVE), and ``updated_at`` are updated.
 
         Args:
             collection_name: Owning collection name.
             canonical_uri:   Unique canonical URI for this source.
-            connector_kind:  Connector type string (e.g. 'folder', 'web').
+            connector_kind:  Connector type string (e.g. 'folder', 'upload').
             content_hash:    SHA-256 of the raw content for dedupe.
+            media_type:      MIME type for upload sources; None for connector-backed sources.
 
         Raises:
             BackendError: On SQLite write failure.
@@ -227,16 +229,17 @@ class SourceRepo:
                 """
                 INSERT INTO sources
                     (collection_name, canonical_uri, connector_kind, content_hash,
-                     status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     status, media_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(collection_name, canonical_uri) DO UPDATE SET
                     connector_kind = excluded.connector_kind,
                     content_hash   = excluded.content_hash,
+                    media_type     = excluded.media_type,
                     status         = 'active',
                     updated_at     = excluded.updated_at
                 """,
                 (collection_name, canonical_uri, connector_kind, content_hash,
-                 SourceStatus.ACTIVE, now, now),
+                 SourceStatus.ACTIVE, media_type, now, now),
             )
             self._conn.execute("COMMIT")
         except sqlite3.Error as exc:
