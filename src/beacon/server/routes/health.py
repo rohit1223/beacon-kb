@@ -11,6 +11,7 @@ as derived by ``beacon.state.repo.derive_corpus_state``.
 
 A 503 problem-details response is returned when the state DB raises
 ``BackendError``, indicating that the backend is unreachable.
+The endpoint also pings Qdrant and returns 503 if Qdrant is unreachable.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from beacon.errors import BackendError, ReadinessError
 from beacon.problems import problem_to_dict
 from beacon.state.db import StateDB
 from beacon.state.repo import CollectionRepo, CorpusState, derive_corpus_state
+from beacon.storage.qdrant import QdrantStore
 
 _PROBLEM_CONTENT_TYPE = "application/problem+json"
 
@@ -48,11 +50,12 @@ async def readyz(request: Request) -> JSONResponse:
 
     Queries the state DB for all registered collections and derives each
     collection's corpus state (empty / building / ready / failed).
+    Also pings the Qdrant store to verify it is reachable.
 
     Returns:
-        200 with ``{"status": "ok", "collections": {name: state, ...}}``
+        200 with ``{"status": "ok", "collections": {name: state, ...}, "qdrant": {...}}``
         when all backends are reachable.
-        503 problem-details when the state DB is unreachable.
+        503 problem-details when the state DB or Qdrant is unreachable.
 
     Args:
         request: The incoming FastAPI request (used to access app state).
@@ -79,10 +82,26 @@ async def readyz(request: Request) -> JSONResponse:
             headers={"Content-Type": _PROBLEM_CONTENT_TYPE},
         )
 
+    # Ping Qdrant to verify it is reachable.
+    store: QdrantStore = request.app.state.qdrant_store
+    try:
+        store.list_collections()
+    except BackendError as exc:
+        readiness_err = ReadinessError(f"Qdrant unreachable: {exc.message}")
+        from beacon.problems import error_to_problem
+        problem = error_to_problem(readiness_err, instance="/readyz")
+        body = problem_to_dict(problem)
+        return JSONResponse(
+            content=body,
+            status_code=503,
+            headers={"Content-Type": _PROBLEM_CONTENT_TYPE},
+        )
+
     return JSONResponse(
         content={
             "status": "ok",
             "collections": collection_states,
+            "qdrant": {"mode": store.mode, "reachable": True},
         },
         status_code=200,
     )

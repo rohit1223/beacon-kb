@@ -397,14 +397,20 @@ class RevisionRepo:
                 """,
                 (RevisionStatus.RETIRED, now, collection_name, RevisionStatus.LIVE),
             )
-            # Promote the given revision.
-            self._conn.execute(
+            # Promote the given revision - must belong to this collection and be STAGED.
+            cursor = self._conn.execute(
                 """
                 UPDATE revisions SET status = ?, updated_at = ?
-                WHERE revision_id = ?
+                WHERE revision_id = ? AND collection_name = ? AND status = ?
                 """,
-                (RevisionStatus.LIVE, now, revision_id),
+                (RevisionStatus.LIVE, now, revision_id, collection_name, RevisionStatus.STAGED),
             )
+            if cursor.rowcount == 0:
+                _rollback(self._conn)
+                raise BackendError(
+                    f"RevisionRepo.set_live: revision {revision_id!r} not found in "
+                    f"collection {collection_name!r} with status staged"
+                )
             self._conn.execute("COMMIT")
         except sqlite3.Error as exc:
             _rollback(self._conn)
@@ -616,6 +622,59 @@ class SyncJobRepo:
         except sqlite3.Error as exc:
             _rollback(self._conn)
             raise BackendError(f"SyncJobRepo.set_failed failed: {exc}") from exc
+
+    def fail_stale_running(self, collection_name: str | None = None) -> int:
+        """Mark all RUNNING jobs as FAILED with a stale-process reason.
+
+        RUNNING jobs cannot survive a process restart: the sync engine that
+        started them is no longer alive. This method is called at startup and
+        at the beginning of each sync to clean up stale state before any new
+        work begins.
+
+        Args:
+            collection_name: When provided, restrict reaping to this collection.
+                When None, reap stale RUNNING jobs across all collections.
+
+        Returns:
+            The number of jobs transitioned from RUNNING to FAILED.
+
+        Raises:
+            BackendError: On SQLite write failure.
+        """
+        reason = json.dumps(
+            {"type": "stale", "message": "Job was RUNNING at process start; presumed dead."}
+        )
+        now = _now_iso()
+        try:
+            self._conn.execute("BEGIN")
+            if collection_name is not None:
+                cursor = self._conn.execute(
+                    """
+                    UPDATE sync_jobs SET
+                        state        = ?,
+                        finished_at  = ?,
+                        error_detail = ?
+                    WHERE state = ? AND collection_name = ?
+                    """,
+                    (SyncJobState.FAILED, now, reason, SyncJobState.RUNNING, collection_name),
+                )
+            else:
+                cursor = self._conn.execute(
+                    """
+                    UPDATE sync_jobs SET
+                        state        = ?,
+                        finished_at  = ?,
+                        error_detail = ?
+                    WHERE state = ?
+                    """,
+                    (SyncJobState.FAILED, now, reason, SyncJobState.RUNNING),
+                )
+            count = cursor.rowcount
+            self._conn.execute("COMMIT")
+            return count
+        except sqlite3.Error as exc:
+            _rollback(self._conn)
+            raise BackendError(f"SyncJobRepo.fail_stale_running failed: {exc}") from exc
 
     def get(self, job_id: str) -> sqlite3.Row | None:
         """Return the job row for *job_id*, or None if not found.

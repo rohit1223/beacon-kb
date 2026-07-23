@@ -272,6 +272,12 @@ class QdrantStore:
         ``SPARSE_VECTOR_NAME``).
 
         Raises ``BackendError`` for any Qdrant failure.
+
+        Note:
+            Qdrant point IDs must be either UUID strings or unsigned 64-bit integers.
+            String IDs that are not valid UUIDs will be rejected by the Qdrant client
+            at runtime. Ensure all point IDs passed as the first element of each
+            tuple are valid UUID strings or unsigned integers.
         """
         try:
             structs: list[qmodels.PointStruct] = [

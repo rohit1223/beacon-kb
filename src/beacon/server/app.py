@@ -61,9 +61,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     state_db = StateDB(db_path=db_path)
     app.state.state_db = state_db
 
-    # Ensure the Qdrant storage path exists (embedded mode).
+    # Ensure the Qdrant storage path exists (embedded mode only).
     qdrant_path = settings.qdrant.path
-    Path(qdrant_path).mkdir(parents=True, exist_ok=True)
+    if settings.qdrant.url is None:
+        Path(qdrant_path).mkdir(parents=True, exist_ok=True)
 
     qdrant_store = QdrantStore(settings)
     app.state.qdrant_store = qdrant_store

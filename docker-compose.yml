@@ -68,9 +68,6 @@ services:
       - "11434:11434"
     volumes:
       - ollama-data:/root/.ollama
-    environment:
-      # Set the model to pre-pull at container start.
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-llama3.2}"
 
 volumes:
   beacon-data:

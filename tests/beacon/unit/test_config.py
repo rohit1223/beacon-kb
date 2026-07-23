@@ -187,9 +187,8 @@ class TestSectionEnvIsolation:
             if key.startswith("BEACON_"):
                 monkeypatch.delenv(key, raising=False)
         settings = BeaconSettings()
-        # qdrant.path must be the short relative default, not the colon-separated
-        # shell PATH string.
-        assert ":" not in settings.qdrant.path
+        # qdrant.path must be exactly the short relative default.
+        assert settings.qdrant.path == "data/qdrant"
 
     def test_beacon_server_port_env_still_routes_correctly(
         self, monkeypatch: pytest.MonkeyPatch

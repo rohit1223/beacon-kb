@@ -332,6 +332,9 @@ class TestSmokeWalk:
             "has.dot",
             "has/slash",
             "a" * 65,
+            "has__double",
+            "__starts",
+            "ends__",
         ],
     )
     def test_invalid_collection_names(self, tmp_path: Any, name: str) -> None:

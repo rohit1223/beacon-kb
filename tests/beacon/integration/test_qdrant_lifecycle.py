@@ -29,7 +29,7 @@ def _settings(tmp_path: Path, qdrant_path: str | None = None) -> BeaconSettings:
     """Return BeaconSettings pointing at tmp_path for embedded Qdrant."""
     path = qdrant_path or str(tmp_path / "qdrant")
     return BeaconSettings(
-        qdrant=QdrantSettings(url=None, path=path, collection_prefix="test")
+        qdrant=QdrantSettings(url=None, path=path)
     )
 
 

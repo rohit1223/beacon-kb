@@ -22,6 +22,7 @@ localhost.
 from __future__ import annotations
 
 import ipaddress
+import secrets
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request, Response
@@ -125,7 +126,7 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
             return _unauthorized_response("Authorization header with Bearer token required")
 
         provided_key = auth_header[len("Bearer "):]
-        if provided_key != self._api_key:
+        if not secrets.compare_digest(provided_key, self._api_key):
             return _unauthorized_response("Invalid API key")
 
         return await call_next(request)

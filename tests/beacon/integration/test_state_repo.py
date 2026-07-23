@@ -291,6 +291,24 @@ class TestRevisionRepo:
         assert repo.get_live(collection_name="col-b") is None
         db.close()
 
+    def test_set_live_wrong_collection_raises_and_no_change(self, tmp_path: Any) -> None:
+        """set_live with mismatched revision/collection raises BackendError and changes nothing."""
+        import pytest
+
+        from beacon.errors import BackendError
+        db = _open(tmp_path)
+        repo = RevisionRepo(db)
+        # Create a revision in col-a.
+        repo.create(revision_id="rev-a", collection_name="col-a", fingerprint="fp-a")
+        # Attempt to promote it as if it belongs to col-b - must raise.
+        with pytest.raises(BackendError):
+            repo.set_live("rev-a", collection_name="col-b")
+        # The revision must still be STAGED in col-a.
+        row = repo.get("rev-a")
+        db.close()
+        assert row is not None
+        assert row["status"] == RevisionStatus.STAGED
+
 
 # ---------------------------------------------------------------------------
 # Sync jobs
@@ -398,6 +416,48 @@ class TestSyncJobRepo:
         assert row is not None
         assert row["state"] == SyncJobState.SUCCEEDED
         assert row["sources_added"] == 5
+
+    def test_fail_stale_running_marks_running_jobs_failed(self, tmp_path: Any) -> None:
+        """fail_stale_running transitions all RUNNING jobs to FAILED."""
+        db = _open(tmp_path)
+        repo = SyncJobRepo(db)
+        repo.create(job_id="j-run-1", collection_name="docs")
+        repo.set_running("j-run-1")
+        repo.create(job_id="j-run-2", collection_name="docs")
+        repo.set_running("j-run-2")
+        repo.create(job_id="j-pending", collection_name="docs")
+
+        count = repo.fail_stale_running()
+        assert count == 2
+
+        r1 = repo.get("j-run-1")
+        r2 = repo.get("j-run-2")
+        r3 = repo.get("j-pending")
+        db.close()
+        assert r1 is not None and r1["state"] == SyncJobState.FAILED
+        assert r2 is not None and r2["state"] == SyncJobState.FAILED
+        assert r3 is not None and r3["state"] == SyncJobState.PENDING
+        # Error detail must explain the reason.
+        detail = json.loads(r1["error_detail"])
+        assert detail["type"] == "stale"
+
+    def test_fail_stale_running_scoped_to_collection(self, tmp_path: Any) -> None:
+        """fail_stale_running with collection_name only reaps that collection's jobs."""
+        db = _open(tmp_path)
+        repo = SyncJobRepo(db)
+        repo.create(job_id="j-a", collection_name="col-a")
+        repo.set_running("j-a")
+        repo.create(job_id="j-b", collection_name="col-b")
+        repo.set_running("j-b")
+
+        count = repo.fail_stale_running(collection_name="col-a")
+        assert count == 1
+
+        ra = repo.get("j-a")
+        rb = repo.get("j-b")
+        db.close()
+        assert ra is not None and ra["state"] == SyncJobState.FAILED
+        assert rb is not None and rb["state"] == SyncJobState.RUNNING
 
 
 # ---------------------------------------------------------------------------
@@ -553,3 +613,33 @@ class TestCorpusState:
         )
 
         db.close()
+
+    def test_failed_state_derived_from_latest_finished_at(self, tmp_path: Any) -> None:
+        """FAILED: last job by finished_at is FAILED even though an earlier SUCCEEDED job exists.
+
+        Scenario: job A succeeded, then job B failed later. No LIVE revision.
+        derive_corpus_state must return FAILED because B finished most recently.
+        """
+        import time as _time
+        db = _open(tmp_path)
+        job_repo = SyncJobRepo(db)
+
+        # Job A: created, run, succeeded earlier.
+        job_repo.create(job_id="job-a", collection_name="docs")
+        job_repo.set_running("job-a")
+        job_repo.set_succeeded("job-a")
+
+        # Small sleep to ensure different finished_at timestamps.
+        _time.sleep(0.01)
+
+        # Job B: created, run, failed later.
+        job_repo.create(job_id="job-b", collection_name="docs")
+        job_repo.set_running("job-b")
+        job_repo.set_failed("job-b", error_detail={"type": "backend", "message": "crash"})
+
+        # No live revision exists.
+        state = derive_corpus_state(db, collection_name="docs")
+        db.close()
+        assert state == CorpusState.FAILED, (
+            f"Expected FAILED (job-b finished later with failure), got {state!r}"
+        )

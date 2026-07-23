@@ -64,14 +64,15 @@ class QdrantSettings(BaseModel):
     url: str | None = None
     path: str = Field(default_factory=lambda: "data/qdrant")
     api_key: SecretStr | None = None
-    collection_prefix: str = "beacon"
+    # collection_prefix removed: physical collection naming uses the revision ID
+    # directly (e.g. __rev_<id> shadow names) and does not rely on a prefix field.
     timeout: float = 10.0
 
     def __repr__(self) -> str:
         return (
             f"QdrantSettings(url={self.url!r}, path={self.path!r}, "
             f"api_key={'**REDACTED**' if self.api_key else None!r}, "
-            f"collection_prefix={self.collection_prefix!r}, timeout={self.timeout!r})"
+            f"timeout={self.timeout!r})"
         )
 
 
@@ -215,7 +216,6 @@ class BeaconSettings(BaseSettings):
                 "url": self.qdrant.url,
                 "path": self.qdrant.path,
                 "api_key": "**REDACTED**" if self.qdrant.api_key else None,
-                "collection_prefix": self.qdrant.collection_prefix,
                 "timeout": self.qdrant.timeout,
             },
             "state": {

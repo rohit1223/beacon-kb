@@ -16,26 +16,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only the dependency manifest first so this layer is cached
-# independently of source changes.
-COPY pyproject.toml ./
-COPY src/beacon/__init__.py src/beacon/__init__.py
-COPY src/beacon/py.typed src/beacon/py.typed
+# Copy package metadata and all source files.
+# setuptools needs README.md, LICENSE, and src/beacon_kb/version.py
+# (via version = {attr = "beacon_kb.version.__version__"}) at build time.
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ src/
 
 # Install the package with the server extra into the prefix.
-# --no-build-isolation is used so pip reuses the already-installed build
-# backend from the base image; --root-user-action=ignore silences the pip
-# warning about running as root inside Docker.
+# --root-user-action=ignore silences the pip warning about running as root
+# inside Docker.
 RUN pip install --no-cache-dir --root-user-action=ignore \
         ".[server]"
 
-# Now copy the full source and reinstall to pick up the real package.
-COPY src/ src/
-RUN pip install --no-cache-dir --root-user-action=ignore --no-deps ".[server]"
-
 # ---------------------------------------------------------------------------
 # Stage 2: runtime
-# Minimal image with only the installed packages and the application source.
+# Minimal image with only the installed packages.
 # No build tools, no package manager caches.
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim AS runtime
@@ -49,9 +44,6 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages/ \
                      /usr/local/lib/python3.13/site-packages/
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
-
-# Copy application source.
-COPY src/ src/
 
 # Create data directories and give ownership to the non-root user.
 RUN mkdir -p /data/qdrant && chown -R beacon:beacon /data /app

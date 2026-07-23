@@ -188,9 +188,9 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/beacon_kb"]
+source = ["src/beacon_kb", "src/beacon"]
 branch = true
-omit = ["src/beacon_kb/py.typed"]
+omit = ["src/beacon_kb/py.typed", "src/beacon/py.typed"]
 
 [tool.coverage.report]
 show_missing = true

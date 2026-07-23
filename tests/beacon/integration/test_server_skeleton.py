@@ -224,6 +224,42 @@ class TestReadyz:
         assert body.get("kind") == "readiness"
         assert r.headers["content-type"].startswith("application/problem+json")
 
+    def test_readyz_includes_qdrant_info(self, tmp_path: Any) -> None:
+        """200 readyz response includes qdrant reachability info."""
+        s = _settings(tmp_path)
+        with _client(s) as c:
+            r = c.get("/readyz")
+        assert r.status_code == 200
+        body = r.json()
+        assert "qdrant" in body
+        assert body["qdrant"]["reachable"] is True
+        assert body["qdrant"]["mode"] in ("embedded", "server")
+
+    def test_readyz_503_when_qdrant_unreachable(self, tmp_path: Any) -> None:
+        """503 problem when Qdrant store raises BackendError during ping."""
+        from beacon.errors import BackendError
+        from beacon.storage import qdrant as qdrant_mod
+
+        s = _settings(tmp_path)
+        app = create_app(s)
+
+        original_list = qdrant_mod.QdrantStore.list_collections
+
+        def _raise(self: Any) -> Any:
+            raise BackendError("qdrant unreachable")
+
+        qdrant_mod.QdrantStore.list_collections = _raise  # type: ignore[method-assign]
+        try:
+            with TestClient(app, raise_server_exceptions=False) as c:
+                r = c.get("/readyz")
+        finally:
+            qdrant_mod.QdrantStore.list_collections = original_list  # type: ignore[method-assign]
+
+        assert r.status_code == 503
+        body = r.json()
+        assert body.get("kind") == "readiness"
+        assert r.headers["content-type"].startswith("application/problem+json")
+
 
 # ---------------------------------------------------------------------------
 # Error handlers: taxonomy errors
@@ -468,46 +504,66 @@ class TestTelemetry:
             assert span is not None
 
     def test_app_imports_when_otel_absent(self) -> None:
-        """App imports and operates cleanly when OpenTelemetry is unavailable.
+        """telemetry module correctly no-ops when opentelemetry is not importable.
 
-        Simulates absence by hiding opentelemetry modules from sys.modules,
-        forcing re-import fallback paths.
+        Uses a sys.meta_path blocker to raise ImportError for any opentelemetry
+        import, then reloads the telemetry module to verify _OTEL_AVAILABLE is
+        False and instrument_app is a no-op.
         """
         import importlib
+        import importlib.abc
+        import importlib.machinery
         import sys
+        from types import ModuleType
 
-        # Save original state.
-        original_modules: dict[str, Any] = {}
-        otel_keys = [k for k in sys.modules.keys() if "opentelemetry" in k]
-        for key in otel_keys:
-            original_modules[key] = sys.modules.pop(key)
+        class _BlockOtel(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+            """Meta path finder that blocks opentelemetry imports."""
 
+            def find_spec(
+                self,
+                fullname: str,
+                path: object,
+                target: object = None,
+            ) -> importlib.machinery.ModuleSpec | None:
+                if fullname.startswith("opentelemetry"):
+                    return importlib.machinery.ModuleSpec(fullname, self)
+                return None
+
+            def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType | None:
+                return None
+
+            def exec_module(self, module: ModuleType) -> None:
+                raise ImportError(f"opentelemetry blocked for test: {module.__name__}")
+
+        blocker = _BlockOtel()
+
+        # Save and purge opentelemetry modules.
+        saved: dict[str, Any] = {}
+        for k in list(sys.modules):
+            if "opentelemetry" in k:
+                saved[k] = sys.modules.pop(k)
+
+        sys.meta_path.insert(0, blocker)
         try:
-            # Block re-import by deleting (will raise ImportError on access).
-            sys.modules.pop("opentelemetry", None)
-            sys.modules.pop("opentelemetry.trace", None)
-
-            # Force re-import of telemetry with OTel missing.
             import beacon.server.telemetry as telemetry_mod
-
             importlib.reload(telemetry_mod)
 
-            # Verify instrument_app is a no-op when OTel unavailable.
-            from beacon.server.app import create_app
+            # _OTEL_AVAILABLE must be False when the SDK is blocked.
+            assert telemetry_mod._OTEL_AVAILABLE is False
 
+            # instrument_app must be a no-op (must not raise).
+            from beacon.server.app import create_app
             s = BeaconSettings()
-            # Should not raise; instrument_app returns early when OTel is missing.
             app = create_app(s)
             assert app is not None
+            telemetry_mod.instrument_app(app)
 
-            # Verify get_tracer still returns a usable tracer.
+            # get_tracer must still return a usable tracer.
             tracer = telemetry_mod.get_tracer()
             with tracer.start_as_current_span("test") as span:
                 assert span is not None
-
         finally:
-            # Restore original modules.
-            sys.modules.pop("opentelemetry", None)
-            sys.modules.pop("opentelemetry.trace", None)
-            for key, mod in original_modules.items():
-                sys.modules[key] = mod
+            sys.meta_path.remove(blocker)
+            for k, mod in saved.items():
+                sys.modules[k] = mod
+            importlib.reload(telemetry_mod)

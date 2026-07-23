@@ -10,3 +10,4 @@ tests/
 dist/
 *.egg-info
 docs/
+data/

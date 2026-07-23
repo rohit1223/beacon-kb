@@ -34,6 +34,11 @@ def _validate_collection_name(name: str) -> str:
         raise ValueError(
             "Collection name must not be empty."
         )
+    if "__" in name:
+        raise ValueError(
+            "Collection name must not contain double underscores (__); "
+            "that prefix is reserved for internal shadow collections."
+        )
     if not _COLLECTION_NAME_RE.match(name):
         raise ValueError(
             "Collection name must contain only lowercase alphanumerics, "
