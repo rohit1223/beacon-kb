@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import sqlite3
 import uuid
 from collections.abc import Callable
 
@@ -11,12 +13,13 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from beacon.ingest.chunking import ChunkerConfig
-from beacon.ingest.connectors.base import Connector
+from beacon.ingest.connectors.base import Connector, ConnectorKind
 from beacon.ingest.connectors.folder import FolderConnector
 from beacon.ingest.connectors.web import WebConnector
 from beacon.ingest.embeddings import EmbedderProvider
 from beacon.ingest.sync import SyncEngine
-from beacon.state.repo import CollectionRepo, SyncJobRepo
+from beacon.state.db import StateDB
+from beacon.state.repo import CollectionRepo, SourceRepo, SyncJobRepo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["sync"])
@@ -60,7 +63,7 @@ def _instantiate_connector(
         HTTPException: 422 if the connector kind is unsupported or required
                        fields are missing.
     """
-    if connector_kind == "folder":
+    if connector_kind == ConnectorKind.FOLDER:
         root = str(connector_config.get("root", "."))
         include_globs_raw = connector_config.get("include_globs", "**/*")
         exclude_globs_raw = connector_config.get("exclude_globs", "")
@@ -90,7 +93,7 @@ def _instantiate_connector(
             exclude_globs=exclude_globs or None,
         )
 
-    if connector_kind == "web":
+    if connector_kind == ConnectorKind.WEB:
         start_urls_raw = connector_config.get("start_urls", "")
         sitemap_url_raw = connector_config.get("sitemap_url", None)
 
@@ -171,7 +174,6 @@ async def _run_sync_background(
                                passes ``None`` to use the real network).
     """
     from beacon.config import BeaconSettings
-    from beacon.state.db import StateDB
     from beacon.storage.qdrant import QdrantStore
 
     def _sync() -> None:
@@ -186,22 +188,32 @@ async def _run_sync_background(
                     connector_config,
                     web_transport_factory=web_transport_factory,
                 )
-                embedder = EmbedderProvider(
-                    model_name=settings.models.embedding_model,
-                    dimension=settings.models.embedding_dimension,
+                # WebConnector owns an httpx.Client; close it when the sync
+                # finishes so connection pools are released.  Connectors
+                # without a close() method (e.g. FolderConnector) need no
+                # cleanup, hence the conditional context.
+                closer: contextlib.AbstractContextManager[object] = (
+                    contextlib.closing(connector)
+                    if hasattr(connector, "close")
+                    else contextlib.nullcontext()
                 )
-                engine = SyncEngine(
-                    store=store,
-                    db=db,
-                    embedder=embedder,
-                    chunker_config=ChunkerConfig(),
-                    settings=settings,
-                )
-                engine.run_sync(
-                    collection_name=collection_name,
-                    connector=connector,
-                    job_id=job_id,
-                )
+                with closer:
+                    embedder = EmbedderProvider(
+                        model_name=settings.models.embedding_model,
+                        dimension=settings.models.embedding_dimension,
+                    )
+                    engine = SyncEngine(
+                        store=store,
+                        db=db,
+                        embedder=embedder,
+                        chunker_config=ChunkerConfig(),
+                        settings=settings,
+                    )
+                    engine.run_sync(
+                        collection_name=collection_name,
+                        connector=connector,
+                        job_id=job_id,
+                    )
             except Exception as exc:
                 # The engine marks the job FAILED for pipeline errors; this
                 # covers failures before the engine takes over (connector or
@@ -225,6 +237,93 @@ async def _run_sync_background(
         )
 
 
+def _parse_config_dict(raw_json: str) -> dict[str, object]:
+    """Parse a JSON string into a str-keyed config dict, tolerating bad input.
+
+    Args:
+        raw_json: JSON text expected to contain an object.
+
+    Returns:
+        Parsed dict with string keys, or an empty dict when the input is not
+        valid JSON or not an object.
+    """
+    try:
+        raw = json.loads(raw_json)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items()}
+
+
+def _resolve_connector_definition(
+    *,
+    db: StateDB,
+    collection_name: str,
+    collection_row: sqlite3.Row,
+) -> tuple[str, dict[str, object]]:
+    """Resolve the connector kind and config for a collection.
+
+    Resolution order:
+
+    1. Connector-definition source rows (``is_connector_definition = 1``)
+       written by ``POST /collections/{name}/sources``.  The config comes from
+       ``config_json``; rows created before migration 0005 that encoded the
+       config JSON in the canonical_uri (``kind://{json}``) are still parsed
+       for backward compatibility.
+    2. Legacy fallback: ``connector_kind`` / ``connector_config`` keys inside
+       the collection row's ``settings_json``.
+
+    Args:
+        db:              Open StateDB instance.
+        collection_name: Logical collection name.
+        collection_row:  The collection's DB row (for the legacy fallback).
+
+    Returns:
+        Tuple of (connector_kind, connector_config).
+
+    Raises:
+        HTTPException: 422 when no connector definition can be resolved.
+    """
+    definition_rows = SourceRepo(db).list_connector_definitions(
+        collection_name=collection_name
+    )
+    if definition_rows:
+        # Deterministic choice: lowest row id (first attached definition).
+        defn = definition_rows[0]
+        connector_kind = str(defn["connector_kind"])
+        config_json_str = defn["config_json"]
+        if config_json_str:
+            return connector_kind, _parse_config_dict(str(config_json_str))
+        # Legacy row: canonical_uri was "{kind}://{json_blob}".
+        canonical_uri = str(defn["canonical_uri"])
+        prefix = f"{connector_kind}://"
+        if canonical_uri.startswith(prefix):
+            return connector_kind, _parse_config_dict(canonical_uri[len(prefix):])
+        return connector_kind, {}
+
+    # Legacy fallback: settings_json on the collection row.
+    settings_json_str = collection_row["settings_json"]
+    try:
+        collection_settings: dict[str, object] = json.loads(settings_json_str or "{}")
+    except (json.JSONDecodeError, TypeError):
+        collection_settings = {}
+
+    connector_kind_raw = collection_settings.get("connector_kind")
+    if not connector_kind_raw:
+        raise HTTPException(
+            status_code=422,
+            detail="Collection has no connector configured",
+        )
+    connector_config_raw = collection_settings.get("connector_config", {})
+    connector_config: dict[str, object] = (
+        {str(k): v for k, v in connector_config_raw.items()}
+        if isinstance(connector_config_raw, dict)
+        else {}
+    )
+    return str(connector_kind_raw), connector_config
+
+
 @router.post("/collections/{collection_name}/sync", status_code=202)
 async def trigger_sync(
     collection_name: str,
@@ -233,8 +332,11 @@ async def trigger_sync(
 ) -> dict[str, str]:
     """Trigger an asynchronous sync for the collection.
 
-    Reads connector configuration from the collection's settings_json field,
-    creates a PENDING sync job, and starts the sync engine in the background.
+    Reads the connector definition from the collection's connector-definition
+    source rows (written by ``POST /collections/{name}/sources``), creates a
+    PENDING sync job, and starts the sync engine in the background.  When no
+    definition row exists, falls back to the legacy ``settings_json`` field on
+    the collection row for backward compatibility.
 
     Rejects with 409 (Conflict) when a PENDING or RUNNING job already exists
     for the collection so callers never queue multiple concurrent syncs.
@@ -262,13 +364,15 @@ async def trigger_sync(
         raise HTTPException(status_code=404, detail=f"Collection {collection_name!r} not found")
 
     # Reject concurrent syncs: only one PENDING or RUNNING job per collection.
+    # The dict detail carries the human-readable message plus RFC 9457
+    # extension members (job_id, state); the HTTPException handler in
+    # error_handlers lifts them to top-level problem+json fields, so no
+    # hand-rolled problem body is built here.
     active_job = SyncJobRepo(db).get_active(collection_name)
     if active_job is not None:
         raise HTTPException(
             status_code=409,
             detail={
-                "type": "https://beacon.local/problems/sync-conflict",
-                "title": "Sync already in progress",
                 "detail": (
                     f"A sync job ({active_job['job_id']!r}) is already"
                     f" {active_job['state']} for collection {collection_name!r}."
@@ -279,24 +383,11 @@ async def trigger_sync(
             },
         )
 
-    # Parse connector config from settings_json.
-    settings_json_str = collection_row["settings_json"]
-    try:
-        collection_settings: dict[str, object] = json.loads(settings_json_str or "{}")
-    except (json.JSONDecodeError, TypeError):
-        collection_settings = {}
-
-    connector_kind_raw = collection_settings.get("connector_kind")
-    connector_config_raw = collection_settings.get("connector_config", {})
-    connector_kind = str(connector_kind_raw) if connector_kind_raw is not None else None
-    connector_config: dict[str, object] = (
-        {str(k): v for k, v in connector_config_raw.items()}
-        if isinstance(connector_config_raw, dict)
-        else {}
+    connector_kind, connector_config = _resolve_connector_definition(
+        db=db,
+        collection_name=collection_name,
+        collection_row=collection_row,
     )
-
-    if not connector_kind:
-        raise HTTPException(status_code=422, detail="Collection has no connector configured")
 
     # Optional test seam: a factory on app.state supplies the httpx transport
     # for WebConnector so tests can run fully offline.

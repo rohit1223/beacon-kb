@@ -19,8 +19,10 @@ Design invariants:
   It is created on first use by calling ``CollectionRepo.create()`` directly,
   bypassing the normal name-validation rules.
 - ``POST /collections/{name}/sources`` validates the collection exists (404 if not)
-  and that the connector_kind is known (422 if not), then upserts a source row
-  with the provided config serialized as the canonical_uri.
+  and that the connector_kind is known (422 if not), then upserts a
+  connector-definition source row: the config is stored as JSON in
+  ``config_json`` and the canonical_uri is a stable hash-based identity
+  (``{kind}://{sha256(config)[:16]}``).
 - All error responses use Content-Type: application/problem+json.
 """
 
@@ -147,6 +149,7 @@ def _source_row_to_response(row: object) -> SourceResponse:
         status=str(r["status"]),
         created_at=str(r["created_at"]),
         media_type=str(r["media_type"]) if r["media_type"] is not None else None,
+        config_json=str(r["config_json"]) if r["config_json"] is not None else None,
     )
 
 
@@ -275,8 +278,15 @@ async def attach_source(
     """Attach a connector-backed source definition to a collection.
 
     Validates the collection exists and the connector_kind is known. Stores
-    the source definition in the state DB sources table with a canonical_uri
-    derived from the connector kind and config.
+    the connector config as ``config_json`` on a definition row (flagged with
+    ``is_connector_definition``) in the sources table; the sync trigger route
+    reads this row to decide which connector to run.
+
+    The canonical_uri is a stable opaque identity derived from a hash of the
+    config (``{kind}://{sha256(config)[:16]}``), NOT the JSON blob itself, so
+    the URI stays short and stable while the full config lives in config_json.
+    Legacy rows that encoded the JSON blob in the canonical_uri are still
+    parsed by the sync trigger route for backward compatibility.
 
     Args:
         request: Incoming FastAPI request.
@@ -297,9 +307,10 @@ async def attach_source(
         problem = error_to_problem(err, instance=f"/collections/{name}/sources")
         return _problem_response(problem_to_dict(problem), 404)
 
-    # Derive a stable canonical_uri from kind + config.
+    # Deterministic JSON config (sorted keys) + stable hash-based identity.
     config_json = json.dumps(body.config, sort_keys=True)
-    canonical_uri = f"{body.connector_kind}://{config_json}"
+    config_hash = hashlib.sha256(config_json.encode("utf-8")).hexdigest()[:16]
+    canonical_uri = f"{body.connector_kind}://{config_hash}"
 
     source_repo = SourceRepo(db)
     source_repo.upsert(
@@ -307,6 +318,8 @@ async def attach_source(
         canonical_uri=canonical_uri,
         connector_kind=body.connector_kind,
         content_hash="",
+        config_json=config_json,
+        is_connector_definition=True,
     )
 
     source_row = source_repo.get(

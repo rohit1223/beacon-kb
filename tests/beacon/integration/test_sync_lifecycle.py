@@ -428,7 +428,8 @@ def test_concurrent_sync_rejected_with_409(
     Two scenarios are tested:
     1. A PENDING job already exists -> second POST returns 409.
     2. A RUNNING job already exists -> second POST returns 409.
-    Both responses must carry problem-detail fields (job_id, state, detail).
+    Both responses are RFC 9457 problem+json with job_id and state as
+    top-level extension members.
     """
     from fastapi.testclient import TestClient
 
@@ -455,8 +456,11 @@ def test_concurrent_sync_rejected_with_409(
         resp = client.post(f"/collections/{collection_name}/sync")
         assert resp.status_code == 409, f"Expected 409, got {resp.status_code}: {resp.text}"
         body = resp.json()
-        assert "job_id" in body.get("detail", body), (
-            f"409 response must carry job_id; got {body}"
+        assert body.get("job_id") == "manual-pending-job", (
+            f"409 response must carry job_id extension member; got {body}"
+        )
+        assert body.get("state") == "pending", (
+            f"409 response must carry state extension member; got {body}"
         )
 
         # Scenario 2: move to RUNNING then attempt a second POST.
@@ -471,11 +475,9 @@ def test_concurrent_sync_rejected_with_409(
             f"Expected 409 for RUNNING job, got {resp2.status_code}: {resp2.text}"
         )
         body2 = resp2.json()
-        detail = body2.get("detail", {})
-        if isinstance(detail, dict):
-            assert detail.get("state") == "running", (
-                f"Expected state=running in detail; got {detail}"
-            )
+        assert body2.get("state") == "running", (
+            f"Expected top-level state=running extension member; got {body2}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -674,3 +676,157 @@ def test_orphaned_pending_job_reaped_at_startup(
         )
     finally:
         check_db.close()
+
+
+# ---------------------------------------------------------------------------
+# Regression: pure REST composition (create -> attach -> sync -> queryable)
+# ---------------------------------------------------------------------------
+
+
+def test_rest_e2e_folder_attach_then_sync(
+    tmp_path: Path, _no_cloud_keys: None
+) -> None:
+    """Pure REST E2E: create collection -> attach folder source -> sync -> succeeded.
+
+    Regression for the composition bug where trigger_sync read connector config
+    from collections.settings_json (which no endpoint sets) while attach_source
+    wrote definition rows the sync never read - and the planner then retired
+    those rows as vanished sources.
+
+    Also verifies the connector-definition row remains active after the sync
+    and that the collection is queryable (a live revision exists).
+    """
+    from fastapi.testclient import TestClient
+
+    from beacon.server.app import create_app
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "readme.md").write_text("# Hello\n\nREST E2E test content here.\n")
+
+    settings = _make_app_settings(tmp_path)
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        r = client.post("/collections", json={"name": "rest-e2e-folder"})
+        assert r.status_code == 201, f"Create collection failed: {r.text}"
+
+        r = client.post(
+            "/collections/rest-e2e-folder/sources",
+            json={"connector_kind": "folder", "config": {"root": str(docs)}},
+        )
+        assert r.status_code == 201, f"Attach source failed: {r.text}"
+        source_body = r.json()
+        assert source_body["connector_kind"] == "folder"
+        assert source_body["config_json"] is not None
+        definition_uri = source_body["canonical_uri"]
+
+        r = client.post("/collections/rest-e2e-folder/sync")
+        assert r.status_code == 202, f"Trigger sync failed: {r.text}"
+        job_id = r.json()["job_id"]
+
+        job = client.get(f"/jobs/{job_id}").json()
+        assert job["state"] == "succeeded", (
+            f"Expected sync succeeded, got {job['state']}."
+            f" error_detail={job.get('error_detail')}"
+        )
+        assert job["sources_added"] >= 1
+
+        # Collection is queryable: detail reports READY with a live revision.
+        detail = client.get("/collections/rest-e2e-folder").json()
+        assert detail["corpus_state"] == "ready", f"Expected ready: {detail}"
+        assert detail["live_revision"] is not None
+
+    # Definition row must still be active after sync (not retired as vanished).
+    db = StateDB(db_path=str(tmp_path / "state.db"))
+    try:
+        row = SourceRepo(db).get(
+            collection_name="rest-e2e-folder",
+            canonical_uri=definition_uri,
+        )
+        assert row is not None
+        assert row["status"] == "active", (
+            f"Connector-definition row must remain active after sync,"
+            f" got {row['status']!r}"
+        )
+        assert row["is_connector_definition"] == 1
+    finally:
+        db.close()
+
+
+def test_rest_e2e_web_attach_then_sync(
+    tmp_path: Path, _no_cloud_keys: None
+) -> None:
+    """Pure REST E2E for web sources: create -> attach web source -> sync -> succeeded.
+
+    Uses the app.state.web_transport_factory seam so no real network is touched.
+    The connector-definition row must remain active after the sync.
+    """
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from beacon.server.app import create_app
+
+    start_url = "http://webtest.local/"
+    page_content = b"<html><body><h1>Web E2E</h1><p>Some page content.</p></body></html>"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if path in ("/", ""):
+            return httpx.Response(
+                200, content=page_content, headers={"content-type": "text/html"}
+            )
+        return httpx.Response(404, text="Not found")
+
+    class _StaticTransport(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            return _handler(request)
+
+    settings = _make_app_settings(tmp_path)
+    app = create_app(settings)
+    app.state.web_transport_factory = lambda _cfg: _StaticTransport()
+
+    with TestClient(app) as client:
+        r = client.post("/collections", json={"name": "rest-e2e-web"})
+        assert r.status_code == 201, f"Create collection failed: {r.text}"
+
+        r = client.post(
+            "/collections/rest-e2e-web/sources",
+            json={
+                "connector_kind": "web",
+                "config": {
+                    "start_urls": start_url,
+                    "max_depth": "0",
+                    "max_pages": "5",
+                },
+            },
+        )
+        assert r.status_code == 201, f"Attach source failed: {r.text}"
+        definition_uri = r.json()["canonical_uri"]
+
+        r = client.post("/collections/rest-e2e-web/sync")
+        assert r.status_code == 202, f"Trigger sync failed: {r.text}"
+        job_id = r.json()["job_id"]
+
+        job = client.get(f"/jobs/{job_id}").json()
+        assert job["state"] == "succeeded", (
+            f"Expected succeeded, got {job['state']}."
+            f" error_detail={job.get('error_detail')}"
+        )
+        assert job["sources_added"] >= 1
+
+    db = StateDB(db_path=str(tmp_path / "state.db"))
+    try:
+        row = SourceRepo(db).get(
+            collection_name="rest-e2e-web",
+            canonical_uri=definition_uri,
+        )
+        assert row is not None
+        assert row["status"] == "active", (
+            f"Definition row must remain active, got {row['status']!r}"
+        )
+        assert row["is_connector_definition"] == 1
+    finally:
+        db.close()

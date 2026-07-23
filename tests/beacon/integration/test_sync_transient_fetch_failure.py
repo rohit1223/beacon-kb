@@ -224,3 +224,111 @@ def test_planned_source_transient_during_processing_fails_sync(tmp_path: Path) -
     finally:
         store.close()
         db.close()
+
+
+def _run_sync_dim(
+    store: QdrantStore,
+    db: StateDB,
+    settings: BeaconSettings,
+    connector: FakeConnector,
+    collection_name: str,
+    job_id: str,
+    dimension: int,
+) -> object:
+    """Run a sync with an embedder of the given dimension (drives fingerprint)."""
+    embedder = FakeEmbedder(dimension=dimension)
+    engine = SyncEngine(
+        store=store,
+        db=db,
+        embedder=embedder,
+        chunker_config=ChunkerConfig(),
+        settings=settings,
+    )
+    return engine.run_sync(
+        collection_name=collection_name,
+        connector=connector,
+        job_id=job_id,
+    )
+
+
+def test_drift_then_transient_then_restore_reindexes(tmp_path: Path) -> None:
+    """Drift + transient must not become a permanent silent source drop.
+
+    Reviewer probe sequence:
+    1. Cold sync succeeds (source indexed).
+    2. Fingerprint drifts (embedder dimension change) while the source fetch
+       fails transiently.  Drift blocks carryover, so the source's prior
+       points cannot survive - but the source must stay active AND its
+       content_hash must be cleared so the next successful fetch is
+       classified CHANGED rather than UNCHANGED.
+    3. The source becomes readable again: the next sync must re-index it.
+    """
+    store, db, settings = _make_everything(tmp_path)
+
+    try:
+        collection_name = "drift-transient"
+        CollectionRepo(db).create(name=collection_name)
+        uri = "fake://drift-doc"
+
+        connector = FakeConnector({
+            uri: b"# Doc\n\nContent for the drift-transient regression test.",
+        })
+
+        # Sync 1: cold sync at dimension 8.
+        SyncJobRepo(db).create(job_id="job-dt-1", collection_name=collection_name)
+        report1 = _run_sync_dim(
+            store, db, settings, connector, collection_name, "job-dt-1", 8
+        )
+        assert report1.sources_added == 1  # type: ignore[attr-defined]
+
+        # Sync 2: dimension changes to 16 (fingerprint drift) AND the source
+        # is transiently unreadable.
+        connector.set_transient(uri)
+        SyncJobRepo(db).create(job_id="job-dt-2", collection_name=collection_name)
+        report2 = _run_sync_dim(
+            store, db, settings, connector, collection_name, "job-dt-2", 16
+        )
+        assert report2.transient_failures == 1  # type: ignore[attr-defined]
+
+        row = SourceRepo(db).get(
+            collection_name=collection_name, canonical_uri=uri
+        )
+        assert row is not None
+        assert row["status"] == "active", (
+            f"Transiently-failing source must stay active, got {row['status']!r}"
+        )
+        assert row["content_hash"] == "", (
+            f"content_hash must be cleared when drift prevents carryover so the"
+            f" next successful fetch is classified CHANGED;"
+            f" got {row['content_hash']!r}"
+        )
+
+        # Sync 3: source readable again, same new dimension.
+        connector.clear_transient(uri)
+        SyncJobRepo(db).create(job_id="job-dt-3", collection_name=collection_name)
+        report3 = _run_sync_dim(
+            store, db, settings, connector, collection_name, "job-dt-3", 16
+        )
+        total_reindexed = (
+            report3.sources_added + report3.sources_changed  # type: ignore[attr-defined]
+        )
+        assert total_reindexed >= 1, (
+            f"Source must be re-indexed after drift+transient+recovery."
+            f" Report: added={report3.sources_added}"  # type: ignore[attr-defined]
+            f" changed={report3.sources_changed}"  # type: ignore[attr-defined]
+        )
+        assert report3.chunks_written > 0  # type: ignore[attr-defined]
+
+        job3 = SyncJobRepo(db).get("job-dt-3")
+        assert job3 is not None
+        assert job3["state"] == SyncJobState.SUCCEEDED
+
+        # The recovered source's hash is repopulated.
+        row3 = SourceRepo(db).get(
+            collection_name=collection_name, canonical_uri=uri
+        )
+        assert row3 is not None
+        assert row3["content_hash"] != ""
+    finally:
+        store.close()
+        db.close()

@@ -566,6 +566,12 @@ class WebConnector(Connector):
         # Track all visited URLs to avoid re-queuing.
         visited: set[str] = {c for c, _ in queue}
 
+        # Track emitted post-redirect final URLs: two distinct requested URLs
+        # (e.g. '/docs' and '/docs/') can redirect to the same final URL, and
+        # emitting both would produce duplicate SourceEntry URIs that break
+        # the sync engine's staged-count validation on every retry.
+        emitted_finals: set[str] = set()
+
         while queue and len(entries) < self._max_pages:
             url, depth = queue.popleft()
             origin = _origin(url)
@@ -590,6 +596,18 @@ class WebConnector(Connector):
             # same-host redirects store the correct identity in SourceEntry.uri.
             final_url = canonicalize_url(str(response.url))
 
+            # Re-check robots.txt on the post-redirect target: the requested
+            # URL may be allowed while the redirect lands on a disallowed
+            # path (same-origin redirects only reach here by construction).
+            if final_url != url and not self._robots_cache.is_allowed(final_url):
+                log.debug(
+                    "robots.txt disallows post-redirect target %s (from %s);"
+                    " skipping",
+                    final_url,
+                    url,
+                )
+                continue
+
             # Fix 2: check 5xx BEFORE 4xx so the branches are semantically
             # correct - 5xx is a transient server error, 4xx is a client error.
             if response.status_code >= 500:
@@ -609,6 +627,18 @@ class WebConnector(Connector):
                     url,
                 )
                 continue
+
+            # Skip redirect duplicates: a different requested URL already
+            # resolved to this final URL and was emitted.
+            if final_url in emitted_finals:
+                log.debug(
+                    "enumerate: final URL %s already emitted (redirect"
+                    " duplicate of %s); skipping",
+                    final_url,
+                    url,
+                )
+                continue
+            emitted_finals.add(final_url)
 
             media_type = _extract_media_type(response.headers.get("content-type"))
             # Derive title from the final URL path.
@@ -776,7 +806,18 @@ class WebConnector(Connector):
             child_pages, _ = _parse_sitemap(self._fetch_xml(child_url))
             page_urls.extend(child_pages)
 
-        return page_urls
+        # Constrain sitemap-derived seeds to the sitemap's own origin: a
+        # sitemap must not be able to seed the crawl with foreign hosts.
+        sitemap_origin = _origin(sitemap_url)
+        on_origin = [u for u in page_urls if _is_same_origin(u, sitemap_origin)]
+        dropped = len(page_urls) - len(on_origin)
+        if dropped:
+            log.warning(
+                "Sitemap %s listed %d off-origin URL(s); dropped",
+                sitemap_url,
+                dropped,
+            )
+        return on_origin
 
     def _fetch_xml(self, url: str) -> str:
         """Fetch XML content from *url*, returning empty string on failure.

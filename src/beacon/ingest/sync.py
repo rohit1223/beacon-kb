@@ -48,22 +48,15 @@ from beacon.ingest.planner import ChangePlan, plan_sync
 from beacon.state.db import StateDB
 from beacon.state.repo import RevisionRepo, SourceRepo, SyncJobRepo
 from beacon.storage.lifecycle import StageHandle, abort, begin_stage, promote
-from beacon.storage.payload import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME, ChunkPayload
+from beacon.storage.payload import (
+    DENSE_VECTOR_NAME,
+    SPARSE_VECTOR_NAME,
+    ChunkPayload,
+    chunk_id_to_point_id,
+)
 from beacon.storage.qdrant import QdrantStore
 
 logger = logging.getLogger(__name__)
-
-
-def _chunk_id_to_point_id(chunk_id: str) -> str:
-    """Convert a 64-char hex chunk_id to a UUID string (first 128 bits).
-
-    Args:
-        chunk_id: 64-character hex SHA-256 chunk identifier.
-
-    Returns:
-        UUID string derived from the first 32 hex chars.
-    """
-    return str(uuid.UUID(chunk_id[:32]))
 
 
 def _now_iso() -> str:
@@ -245,7 +238,7 @@ class SyncEngine:
                 fingerprint=fingerprint,
             )
             points.append(
-                (_chunk_id_to_point_id(chunk.chunk_id), self._build_vectors(emb), payload)
+                (chunk_id_to_point_id(chunk.chunk_id), self._build_vectors(emb), payload)
             )
         return points
 
@@ -497,6 +490,21 @@ class SyncEngine:
                         f"Source {tf.uri!r} could not be carried over under the "
                         f"new pipeline fingerprint; it will be re-indexed when "
                         f"the fetch succeeds"
+                    )
+                    # Clear the stored content_hash: it was recorded under the
+                    # old fingerprint and this revision carries none of the
+                    # source's points.  Without the clear, the next successful
+                    # fetch with unchanged content would classify UNCHANGED
+                    # (hash match, fingerprint match after this promote) and
+                    # the source would be silently dropped from the corpus
+                    # forever.  With an empty hash the next fetch classifies
+                    # CHANGED and re-indexes.
+                    source_repo.upsert(
+                        collection_name=collection_name,
+                        canonical_uri=tf.uri,
+                        connector_kind=tf.connector_kind,
+                        content_hash="",
+                        media_type=tf.media_type or None,
                     )
                     continue
                 chunks_written += self._copy_source_points(

@@ -206,11 +206,14 @@ class SourceRepo:
         connector_kind: str = "",
         content_hash: str = "",
         media_type: str | None = None,
+        config_json: str | None = None,
+        is_connector_definition: bool = False,
     ) -> None:
         """Create or update a source record.
 
         If the source already exists its ``content_hash``, ``connector_kind``,
-        ``media_type``, ``status`` (reset to ACTIVE), and ``updated_at`` are updated.
+        ``media_type``, ``config_json``, ``is_connector_definition``,
+        ``status`` (reset to ACTIVE), and ``updated_at`` are updated.
 
         Args:
             collection_name: Owning collection name.
@@ -218,28 +221,39 @@ class SourceRepo:
             connector_kind:  Connector type string (e.g. 'folder', 'upload').
             content_hash:    SHA-256 of the raw content for dedupe.
             media_type:      MIME type for upload sources; None for connector-backed sources.
+            config_json:     JSON-serialized connector config for definition rows;
+                             None for content-source rows.
+            is_connector_definition:
+                             True when this row is a connector definition attached
+                             via POST /collections/{name}/sources; False for
+                             content sources discovered by the sync engine.
 
         Raises:
             BackendError: On SQLite write failure.
         """
         now = _now_iso()
+        is_def_int = 1 if is_connector_definition else 0
         try:
             self._conn.execute("BEGIN")
             self._conn.execute(
                 """
                 INSERT INTO sources
                     (collection_name, canonical_uri, connector_kind, content_hash,
-                     status, media_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     status, media_type, config_json, is_connector_definition,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(collection_name, canonical_uri) DO UPDATE SET
-                    connector_kind = excluded.connector_kind,
-                    content_hash   = excluded.content_hash,
-                    media_type     = excluded.media_type,
-                    status         = 'active',
-                    updated_at     = excluded.updated_at
+                    connector_kind          = excluded.connector_kind,
+                    content_hash            = excluded.content_hash,
+                    media_type              = excluded.media_type,
+                    config_json             = excluded.config_json,
+                    is_connector_definition = excluded.is_connector_definition,
+                    status                  = 'active',
+                    updated_at              = excluded.updated_at
                 """,
                 (collection_name, canonical_uri, connector_kind, content_hash,
-                 SourceStatus.ACTIVE, media_type, now, now),
+                 SourceStatus.ACTIVE, media_type, config_json, is_def_int,
+                 now, now),
             )
             self._conn.execute("COMMIT")
         except sqlite3.Error as exc:
@@ -295,11 +309,20 @@ class SourceRepo:
         except sqlite3.Error as exc:
             raise BackendError(f"SourceRepo.get failed: {exc}") from exc
 
-    def list_active(self, *, collection_name: str) -> list[sqlite3.Row]:
+    def list_active(
+        self,
+        *,
+        collection_name: str,
+        exclude_definitions: bool = True,
+    ) -> list[sqlite3.Row]:
         """Return all ACTIVE source rows for *collection_name*.
 
         Args:
-            collection_name: Owning collection name.
+            collection_name:     Owning collection name.
+            exclude_definitions: When True (default), exclude connector-definition
+                                 rows (is_connector_definition = 1) so change
+                                 planning only sees content sources.  Pass False
+                                 to include definition rows.
 
         Returns:
             List of sqlite3.Row records with status = ACTIVE.
@@ -308,12 +331,57 @@ class SourceRepo:
             BackendError: On I/O failure.
         """
         try:
+            if exclude_definitions:
+                return self._conn.execute(
+                    """
+                    SELECT * FROM sources
+                    WHERE collection_name = ? AND status = ?
+                      AND is_connector_definition = 0
+                    """,
+                    (collection_name, SourceStatus.ACTIVE),
+                ).fetchall()
             return self._conn.execute(
                 "SELECT * FROM sources WHERE collection_name = ? AND status = ?",
                 (collection_name, SourceStatus.ACTIVE),
             ).fetchall()
         except sqlite3.Error as exc:
             raise BackendError(f"SourceRepo.list_active failed: {exc}") from exc
+
+    def list_connector_definitions(
+        self,
+        *,
+        collection_name: str,
+    ) -> list[sqlite3.Row]:
+        """Return all connector-definition rows for *collection_name*.
+
+        Definition rows are inserted by POST /collections/{name}/sources and
+        carry the connector kind plus its config as ``config_json``.  The sync
+        trigger route reads these rows to decide which connector to run.
+
+        Args:
+            collection_name: Owning collection name.
+
+        Returns:
+            List of sqlite3.Row records with is_connector_definition = 1,
+            ordered by id for deterministic selection.
+
+        Raises:
+            BackendError: On I/O failure.
+        """
+        try:
+            return self._conn.execute(
+                """
+                SELECT * FROM sources
+                WHERE collection_name = ? AND is_connector_definition = 1
+                  AND status = ?
+                ORDER BY id
+                """,
+                (collection_name, SourceStatus.ACTIVE),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise BackendError(
+                f"SourceRepo.list_connector_definitions failed: {exc}"
+            ) from exc
 
 
 # ---------------------------------------------------------------------------

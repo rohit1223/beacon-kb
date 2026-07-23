@@ -20,10 +20,34 @@ scans.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from qdrant_client.http.models import PayloadSchemaType
+
+# ---------------------------------------------------------------------------
+# Chunk-to-point ID conversion
+# ---------------------------------------------------------------------------
+
+
+def chunk_id_to_point_id(chunk_id: str) -> str:
+    """Convert a 64-char hex chunk_id to a Qdrant point ID (UUID string).
+
+    The UUID is derived from the first 32 hex characters (128 bits) of the
+    SHA-256 chunk identifier.  This conversion is the single source of truth
+    shared by the sync engine (write path, Epic 02) and the retrieval layer
+    (read path, Epic 03): both sides must derive identical point IDs for the
+    same chunk so reads and carryover copies address the points the engine
+    wrote.
+
+    Args:
+        chunk_id: 64-character hex SHA-256 chunk identifier.
+
+    Returns:
+        UUID string derived from the first 32 hex chars.
+    """
+    return str(uuid.UUID(chunk_id[:32]))
 
 # ---------------------------------------------------------------------------
 # Named-vector constants

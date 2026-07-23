@@ -93,6 +93,12 @@ def plan_sync(
     enumerated_uris: set[str] = set()
 
     for entry in enumerated:
+        # Defensive dedupe: a connector that emits the same URI twice (e.g. a
+        # redirect pair not collapsed during enumeration) must not produce two
+        # classifications for one source - duplicate URIs inflate the planned
+        # point count and fail staged-count validation on every sync.
+        if entry.uri in enumerated_uris:
+            continue
         enumerated_uris.add(entry.uri)
 
         # Fetch to get content_hash.
@@ -124,8 +130,15 @@ def plan_sync(
             )
             continue
 
-        # FetchSuccess path.
-        assert isinstance(result, FetchSuccess)
+        # FetchSuccess path.  An unknown FetchResult variant is a connector
+        # contract violation, surfaced as a typed error (never an assert:
+        # asserts vanish under python -O and this check guards external code).
+        if not isinstance(result, FetchSuccess):
+            raise TypeError(
+                f"plan_sync: unexpected fetch result type"
+                f" {type(result).__name__!r} for URI {entry.uri!r};"
+                f" expected FetchSuccess, TransientFailure, or ConfirmedDeletion"
+            )
         existing = source_repo.get(collection_name=collection_name, canonical_uri=entry.uri)
 
         if existing is None:

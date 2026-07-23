@@ -182,6 +182,12 @@ class SourceResponse(BaseModel):
     media_type: str | None = None
     """MIME type for upload sources (e.g. 'text/markdown'). None for connector-backed sources."""
 
+    config_json: str | None = None
+    """JSON-serialized connector config for connector-definition sources.
+
+    Populated for rows created by POST /collections/{name}/sources; None for
+    content sources discovered by the sync engine and for uploads."""
+
 
 class DocumentUploadResponse(BaseModel):
     """Response body for POST /documents."""
