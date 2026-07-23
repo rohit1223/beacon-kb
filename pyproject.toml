@@ -181,6 +181,10 @@ markers = [
     "evaluation: RAG evaluation and quality-metric tests",
     "performance: Latency and throughput benchmarks",
 ]
+filterwarnings = [
+    "ignore:Failed to obtain server version.*:UserWarning",
+    "ignore:Payload indexes have no effect in the local Qdrant.*:UserWarning",
+]
 
 [tool.coverage.run]
 source = ["src/beacon_kb"]
