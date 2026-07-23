@@ -19,11 +19,11 @@
 - [x] 4. EPIC-01 TASK-01.4 [M | 7f | ~550 LOC] FastAPI skeleton with health, readiness, problem details, auth, and telemetry - depends: 01.1, 01.3
 - [x] 5. EPIC-01 TASK-01.5 [M | 6f | ~450 LOC] Collections REST resource, compose file, Dockerfile, and smoke test - depends: 01.2, 01.4
   ↳ End of Epic 01 (branch PR: core service and storage)
-- [ ] 6. EPIC-02 TASK-02.1 [L | 8f | ~600 LOC] Connector interface, folder connector, sources resource, and upload endpoint - depends: 01.5
-- [ ] 7. EPIC-02 TASK-02.2 [M | 4f | ~450 LOC] Web and sitemap connector with depth limits and robots respect - depends: 02.1 [parallel-safe with 02.3]
-- [ ] 8. EPIC-02 TASK-02.3 [M | 5f | ~450 LOC] Docling parsing to structured sections - depends: 02.1 [parallel-safe with 02.2]
-- [ ] 9. EPIC-02 TASK-02.4 [M | 5f | ~450 LOC] Hierarchical chunking with parent/child links and heading paths - depends: 02.3
-- [ ] 10. EPIC-02 TASK-02.5 [L | 10f | ~700 LOC] Embeddings auto-detect and the incremental sync engine with staged promotion - depends: 02.2, 02.4
+- [x] 6. EPIC-02 TASK-02.1 [L | 8f | ~600 LOC] Connector interface, folder connector, sources resource, and upload endpoint - depends: 01.5
+- [x] 7. EPIC-02 TASK-02.2 [M | 4f | ~450 LOC] Web and sitemap connector with depth limits and robots respect - depends: 02.1 [parallel-safe with 02.3]
+- [x] 8. EPIC-02 TASK-02.3 [M | 5f | ~450 LOC] Docling parsing to structured sections - depends: 02.1 [parallel-safe with 02.2]
+- [x] 9. EPIC-02 TASK-02.4 [M | 5f | ~450 LOC] Hierarchical chunking with parent/child links and heading paths - depends: 02.3
+- [x] 10. EPIC-02 TASK-02.5 [L | 10f | ~700 LOC] Embeddings auto-detect and the incremental sync engine with staged promotion - depends: 02.2, 02.4
   ↳ End of Epic 02 (branch PR: ingestion wave 1; ported sync regression suites green)
 - [ ] 11. EPIC-03 TASK-03.1 [L | 7f | ~550 LOC] Hybrid retrieval with enforced payload filters and optional rerank - depends: 02.5
 - [ ] 12. EPIC-03 TASK-03.2 [M | 5f | ~500 LOC] Evidence assembly with expansion, budgets, labels, and snippets - depends: 03.1
