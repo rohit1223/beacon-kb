@@ -13,11 +13,11 @@
 
 ### Track 1: Sequential Spine (Epics 01-03, starts immediately)
 
-- [ ] 1. EPIC-01 TASK-01.1 [M | 9f | ~450 LOC] Scaffold the beacon package, dependency group, config, and error taxonomy - depends: none
-- [ ] 2. EPIC-01 TASK-01.2 [L | 6f | ~600 LOC] Qdrant store layer with shadow collections and alias-flip promotion - depends: 01.1
-- [ ] 3. EPIC-01 TASK-01.3 [M | 6f | ~500 LOC] SQLite state DB with migrations for sources, revisions, fingerprints, and jobs - depends: 01.1 [parallel-safe with 01.2]
-- [ ] 4. EPIC-01 TASK-01.4 [M | 7f | ~550 LOC] FastAPI skeleton with health, readiness, problem details, auth, and telemetry - depends: 01.1, 01.3
-- [ ] 5. EPIC-01 TASK-01.5 [M | 6f | ~450 LOC] Collections REST resource, compose file, Dockerfile, and smoke test - depends: 01.2, 01.4
+- [x] 1. EPIC-01 TASK-01.1 [M | 9f | ~450 LOC] Scaffold the beacon package, dependency group, config, and error taxonomy - depends: none
+- [x] 2. EPIC-01 TASK-01.2 [L | 6f | ~600 LOC] Qdrant store layer with shadow collections and alias-flip promotion - depends: 01.1
+- [x] 3. EPIC-01 TASK-01.3 [M | 6f | ~500 LOC] SQLite state DB with migrations for sources, revisions, fingerprints, and jobs - depends: 01.1 [parallel-safe with 01.2]
+- [x] 4. EPIC-01 TASK-01.4 [M | 7f | ~550 LOC] FastAPI skeleton with health, readiness, problem details, auth, and telemetry - depends: 01.1, 01.3
+- [x] 5. EPIC-01 TASK-01.5 [M | 6f | ~450 LOC] Collections REST resource, compose file, Dockerfile, and smoke test - depends: 01.2, 01.4
   ↳ End of Epic 01 (branch PR: core service and storage)
 - [ ] 6. EPIC-02 TASK-02.1 [L | 8f | ~600 LOC] Connector interface, folder connector, sources resource, and upload endpoint - depends: 01.5
 - [ ] 7. EPIC-02 TASK-02.2 [M | 4f | ~450 LOC] Web and sitemap connector with depth limits and robots respect - depends: 02.1 [parallel-safe with 02.3]
