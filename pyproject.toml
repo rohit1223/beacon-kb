@@ -57,6 +57,7 @@ dev = [
     "build>=1.2",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
+    "httpx2>=2.7.0",  # Starlette TestClient httpx2 support for improved HTTP testing
 ]
 # Server stack for the Beacon v2 rebuild.
 # This group is additive: installing without it leaves beacon_kb working unchanged.
