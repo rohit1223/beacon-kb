@@ -301,6 +301,100 @@ class QdrantStore:
                 f"Failed to upsert into '{collection_name}': {exc}"
             ) from exc
 
+    def upsert_records(
+        self,
+        collection_name: str,
+        records: list[qmodels.Record],
+        batch_size: int = 100,
+    ) -> None:
+        """Upsert previously scrolled ``Record`` objects into ``collection_name``.
+
+        Used by the sync engine to carry over unchanged-source points from a
+        prior physical collection into a shadow collection verbatim (same IDs,
+        vectors, and payloads) without re-embedding.
+
+        Args:
+            collection_name: Physical collection to write into.
+            records:         Records from ``scroll_by_source_uri`` (must carry
+                             vectors and payloads).
+            batch_size:      Points per upsert batch.
+
+        Raises:
+            BackendError: On any Qdrant failure.
+        """
+        try:
+            structs = [
+                qmodels.PointStruct(
+                    id=rec.id,
+                    vector=rec.vector,  # type: ignore[arg-type]
+                    payload=rec.payload,
+                )
+                for rec in records
+            ]
+            for start in range(0, len(structs), batch_size):
+                batch = structs[start : start + batch_size]
+                self._client.upsert(collection_name=collection_name, points=batch)
+        except Exception as exc:
+            raise BackendError(
+                f"Failed to upsert records into '{collection_name}': {exc}"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Scroll
+    # ------------------------------------------------------------------
+
+    def scroll_by_source_uri(
+        self,
+        collection_name: str,
+        source_uri: str,
+    ) -> list[qmodels.Record]:
+        """Scroll all points for a given source_uri in collection_name.
+
+        Used by the sync engine to carry over unchanged-source points from a
+        prior collection into the shadow collection without re-embedding.
+
+        Args:
+            collection_name: Physical collection to scroll.
+            source_uri:      Source URI to filter on (payload field ``source_uri``).
+
+        Returns:
+            List of ``qmodels.Record`` with full payload and vectors.
+
+        Raises:
+            BackendError: On Qdrant failure.
+        """
+        scroll_filter = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="source_uri",
+                    match=qmodels.MatchValue(value=source_uri),
+                )
+            ]
+        )
+
+        all_records: list[qmodels.Record] = []
+        offset: Any = None
+        try:
+            while True:
+                records, next_offset = self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=scroll_filter,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=True,
+                )
+                all_records.extend(records)
+                if next_offset is None:
+                    break
+                offset = next_offset
+        except Exception as exc:
+            raise BackendError(
+                f"Failed to scroll '{collection_name}'"
+                f" for source_uri={source_uri!r}: {exc}"
+            ) from exc
+        return all_records
+
     # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------

@@ -238,7 +238,7 @@ class TestMigration0003:
     def test_schema_version_reaches_3(self, tmp_path: Any) -> None:
         """After fresh open, schema version must be at least 3."""
         db = StateDB(db_path=str(tmp_path / "m3.db"))
-        assert db.schema_version() == 3
+        assert db.schema_version() >= 3
         db.close()
 
     def test_fk_enforced_on_insert(self, tmp_path: Any) -> None:
@@ -310,4 +310,96 @@ class TestMigration0003:
         assert row["connector_kind"] == "folder"
         # media_type must be present as a column and NULL for legacy rows.
         assert row["media_type"] is None, "Legacy rows must have NULL media_type after migration"
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Migration 0004: revisions.physical_collection column
+# ---------------------------------------------------------------------------
+
+
+class TestMigration0004:
+    """Migration 0004 adds physical_collection column to revisions."""
+
+    def test_schema_version_reaches_4(self, tmp_path: Any) -> None:
+        """After fresh open, schema version must be at least 4."""
+        db = StateDB(db_path=str(tmp_path / "m4.db"))
+        assert db.schema_version() >= 4
+        db.close()
+
+    def test_physical_collection_column_exists(self, tmp_path: Any) -> None:
+        """revisions table must have a physical_collection column after migration."""
+        db = StateDB(db_path=str(tmp_path / "pc.db"))
+        info = db.connection().execute("PRAGMA table_info(revisions)").fetchall()
+        db.close()
+        cols = {row["name"] for row in info}
+        assert "physical_collection" in cols
+
+    def test_existing_revisions_row_survives_with_null(self, tmp_path: Any) -> None:
+        """Rows in revisions before 0004 survive migration with NULL physical_collection.
+
+        Build a genuine 0003-era DB via raw sqlite3 (apply 0001-0003, record
+        versions 1-3), insert a revisions row, then open with StateDB (triggers
+        0004) and assert the row survives with physical_collection NULL.
+        """
+        import pathlib
+        import sqlite3 as _sqlite3
+
+        db_path = str(tmp_path / "pre0004.db")
+
+        migrations_dir = (
+            pathlib.Path(__file__).parents[3]
+            / "src" / "beacon" / "state" / "migrations"
+        )
+        sql_0001 = (migrations_dir / "0001_initial.sql").read_text()
+        sql_0002 = (migrations_dir / "0002_single_live_index.sql").read_text()
+        sql_0003 = (migrations_dir / "0003_sources_fk.sql").read_text()
+
+        raw_conn = _sqlite3.connect(db_path)
+        raw_conn.row_factory = _sqlite3.Row
+        raw_conn.execute("PRAGMA journal_mode=WAL")
+        raw_conn.execute("PRAGMA foreign_keys=OFF")
+        raw_conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        raw_conn.executescript(sql_0001)
+        raw_conn.executescript(sql_0002)
+        raw_conn.executescript(sql_0003)
+        for version in (1, 2, 3):
+            raw_conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (version, "2000-01-01T00:00:00.000Z"),
+            )
+
+        # Insert a collections row (required by FK) and a revisions row.
+        raw_conn.execute(
+            "INSERT INTO collections (name) VALUES (?)", ("legacy-col-4",)
+        )
+        raw_conn.execute(
+            "INSERT INTO revisions (revision_id, collection_name, fingerprint, status)"
+            " VALUES (?, ?, ?, ?)",
+            ("rev-0003-era", "legacy-col-4", "fp-legacy", "live"),
+        )
+        raw_conn.commit()
+        raw_conn.close()
+
+        # Open with StateDB - this triggers migration 0004 (ADD COLUMN physical_collection).
+        db = StateDB(db_path=db_path)
+        conn = db.connection()
+        row = conn.execute(
+            "SELECT * FROM revisions WHERE revision_id = ?", ("rev-0003-era",)
+        ).fetchone()
+        assert row is not None, "Legacy revision row must survive migration 0004"
+        assert row["collection_name"] == "legacy-col-4"
+        assert row["fingerprint"] == "fp-legacy"
+        assert row["status"] == "live"
+        # physical_collection column must be present and NULL for legacy rows.
+        assert row["physical_collection"] is None, (
+            "Legacy revisions must have NULL physical_collection after migration 0004"
+        )
+        # Column must exist in the schema.
+        info = conn.execute("PRAGMA table_info(revisions)").fetchall()
+        col_names = {r["name"] for r in info}
+        assert "physical_collection" in col_names
         db.close()

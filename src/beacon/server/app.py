@@ -30,6 +30,7 @@ from beacon.server.error_handlers import register_error_handlers
 from beacon.server.routes.collections import router as collections_router
 from beacon.server.routes.documents import router as documents_router
 from beacon.server.routes.health import router as health_router
+from beacon.server.routes.sync import router as sync_router
 from beacon.server.telemetry import instrument_app
 
 
@@ -61,6 +62,14 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     state_db = StateDB(db_path=db_path)
     app.state.state_db = state_db
+
+    # Reap any RUNNING or PENDING jobs left over from a previous process.
+    # Both states are stale by definition at startup: the background worker
+    # that owned them is no longer alive.  This unblocks the 409 guard so
+    # the collection's sync endpoint can accept new requests immediately.
+    from beacon.state.repo import SyncJobRepo as _SyncJobRepo
+
+    _SyncJobRepo(state_db).fail_stale_running()  # all collections, no filter
 
     # Ensure the Qdrant storage path exists (embedded mode only).
     qdrant_path = settings.qdrant.path
@@ -125,6 +134,7 @@ def create_app(settings: BeaconSettings | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(collections_router)
     app.include_router(documents_router)
+    app.include_router(sync_router)
 
     # Wire up OTel instrumentation (no-op when OTel not configured).
     instrument_app(app, settings=settings)
