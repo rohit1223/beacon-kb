@@ -55,13 +55,15 @@ def _point(
         title="Test",
         heading_path=[],
         tags=["alpha"],
-        created_at=None,
-        modified_at=None,
         ingested_at="2026-01-01T00:00:00Z",
         content_hash="abc",
         chunk_hash="def",
-        parent_chunk_id=None,
         fingerprint="ghi",
+        kind="child",
+        section_kind="text",
+        created_at=None,
+        modified_at=None,
+        parent_chunk_id=None,
     )
     return point_id, vectors, payload
 

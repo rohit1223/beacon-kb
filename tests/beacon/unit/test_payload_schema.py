@@ -47,6 +47,8 @@ class TestChunkPayloadSchema:
             "chunk_hash": "def456",
             "parent_chunk_id": None,
             "fingerprint": "ghi789",
+            "kind": "parent",
+            "section_kind": "text",
         }
 
     def test_create_minimal_payload(self) -> None:
@@ -123,6 +125,10 @@ class TestChunkPayloadSchema:
             "chunk_hash",
             "parent_chunk_id",
             "fingerprint",
+            "kind",
+            "section_kind",
+            "prev_chunk_id",
+            "next_chunk_id",
         }
         assert required_keys.issubset(d.keys())
 
