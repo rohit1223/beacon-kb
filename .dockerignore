@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+.mypy_cache
+.ruff_cache
+.superpowers
+tests/
+**/__pycache__
+*.pyc
+dist/
+*.egg-info
+docs/

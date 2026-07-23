@@ -22,6 +22,8 @@ class BeaconErrorKind(StrEnum):
     INGESTION = "ingestion"
     CITATION = "citation"
     BUDGET = "budget"
+    CONFLICT = "conflict"
+    NOT_FOUND = "not-found"
 
 
 class BeaconError(Exception):
@@ -118,3 +120,25 @@ class AnswerError(BackendError):
     Subclasses ``BackendError`` because the cause is always an external LLM
     provider failure; its ``kind`` is therefore ``backend``.
     """
+
+
+class ConflictError(BeaconError):
+    """Raised when an operation conflicts with existing state.
+
+    Covers: creating a collection that already exists, duplicate sync job IDs.
+
+    Maps to HTTP 409 Conflict.
+    """
+
+    kind = BeaconErrorKind.CONFLICT
+
+
+class NotFoundError(BeaconError):
+    """Raised when a requested resource does not exist.
+
+    Covers: GET /collections/{name} for a name that is not registered.
+
+    Maps to HTTP 404 Not Found.
+    """
+
+    kind = BeaconErrorKind.NOT_FOUND

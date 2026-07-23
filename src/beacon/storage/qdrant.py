@@ -114,6 +114,20 @@ class QdrantStore:
         """``'embedded'`` or ``'server'``; exposed for ``/readyz`` reporting."""
         return self._mode
 
+    def close(self) -> None:
+        """Close the underlying Qdrant client connection.
+
+        For embedded mode, this closes the in-process connection gracefully.
+        For server mode, this closes the HTTP session.
+        Safe to call multiple times; the second and subsequent calls are no-ops.
+        """
+        try:
+            self._client.close()
+        except Exception as exc:
+            # Log at debug level; suppress exceptions during cleanup to avoid
+            # masking primary errors in the calling context.
+            logger.debug("Failed to close Qdrant client: %s", exc)
+
     # ------------------------------------------------------------------
     # Collection CRUD
     # ------------------------------------------------------------------

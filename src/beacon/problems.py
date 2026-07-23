@@ -31,6 +31,8 @@ KIND_TO_STATUS: dict[BeaconErrorKind, int] = {
     BeaconErrorKind.INGESTION: 422,
     BeaconErrorKind.CITATION: 422,
     BeaconErrorKind.BUDGET: 402,
+    BeaconErrorKind.CONFLICT: 409,
+    BeaconErrorKind.NOT_FOUND: 404,
 }
 
 # Default titles for each kind, shown in the ``title`` field.
@@ -40,6 +42,8 @@ _KIND_TITLES: dict[BeaconErrorKind, str] = {
     BeaconErrorKind.INGESTION: "Ingestion Error",
     BeaconErrorKind.CITATION: "Citation Error",
     BeaconErrorKind.BUDGET: "Budget Exceeded",
+    BeaconErrorKind.CONFLICT: "Conflict",
+    BeaconErrorKind.NOT_FOUND: "Not Found",
 }
 
 # Base URI for the ``type`` field.

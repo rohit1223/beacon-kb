@@ -27,6 +27,7 @@ from fastapi import FastAPI
 
 from beacon.config import BeaconSettings
 from beacon.server.error_handlers import register_error_handlers
+from beacon.server.routes.collections import router as collections_router
 from beacon.server.routes.health import router as health_router
 from beacon.server.telemetry import instrument_app
 
@@ -35,8 +36,9 @@ from beacon.server.telemetry import instrument_app
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan context that initialises and tears down per-instance resources.
 
-    Opens the state DB on startup and closes it on shutdown so that tests
-    using ``TestClient`` get clean teardown without leaking file handles.
+    Opens the state DB and QdrantStore on startup and closes them on shutdown
+    so that tests using ``TestClient`` get clean teardown without leaking file
+    handles or Qdrant embedded connections.
 
     The settings object is stored on ``app.state.settings`` by ``create_app``
     before the lifespan runs, so the lifespan can read it directly.
@@ -48,6 +50,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         Control while the server is running.
     """
     from beacon.state.db import StateDB
+    from beacon.storage.qdrant import QdrantStore
 
     settings: BeaconSettings = app.state.settings
 
@@ -58,10 +61,18 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     state_db = StateDB(db_path=db_path)
     app.state.state_db = state_db
 
+    # Ensure the Qdrant storage path exists (embedded mode).
+    qdrant_path = settings.qdrant.path
+    Path(qdrant_path).mkdir(parents=True, exist_ok=True)
+
+    qdrant_store = QdrantStore(settings)
+    app.state.qdrant_store = qdrant_store
+
     try:
         yield
     finally:
         state_db.close()
+        qdrant_store.close()
 
 
 def create_app(settings: BeaconSettings | None = None) -> FastAPI:
@@ -110,6 +121,7 @@ def create_app(settings: BeaconSettings | None = None) -> FastAPI:
 
     # Mount route routers.
     app.include_router(health_router)
+    app.include_router(collections_router)
 
     # Wire up OTel instrumentation (no-op when OTel not configured).
     instrument_app(app, settings=settings)

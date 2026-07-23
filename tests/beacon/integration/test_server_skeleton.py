@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from beacon.config import BeaconSettings, ServerSettings, StateSettings
+from beacon.config import BeaconSettings, QdrantSettings, ServerSettings, StateSettings
 from beacon.errors import (
     BackendError,
     BudgetError,
@@ -41,13 +41,14 @@ from beacon.state.repo import (
 
 
 def _settings(tmp_path: Any, *, api_key: str | None = None) -> BeaconSettings:
-    """Build test settings backed by a tmp_path SQLite DB."""
+    """Build test settings backed by a tmp_path SQLite DB and embedded Qdrant."""
     server_kw: dict[str, Any] = {}
     if api_key is not None:
         server_kw["api_key"] = api_key
     return BeaconSettings(
         server=ServerSettings(**server_kw),
         state=StateSettings(db_path=str(tmp_path / "beacon.db")),
+        qdrant=QdrantSettings(path=str(tmp_path / "qdrant")),
     )
 
 
