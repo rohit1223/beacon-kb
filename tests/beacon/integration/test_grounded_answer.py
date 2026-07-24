@@ -67,6 +67,7 @@ def _hit(chunk_id: str, label: str, *, score: float = 0.9, text: str = "referenc
         score=score,
         context_of=None,
         snippet=_snippet(text, chunk_id=chunk_id),
+        text=text,
     )
 
 

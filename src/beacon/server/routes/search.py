@@ -1,41 +1,26 @@
 """POST /search endpoint: hybrid retrieval returning an EvidenceBundle (Task 03.4).
 
-The search route performs zero LLM calls by construction: it runs the hybrid
-retrieval pipeline and assembles evidence, but never touches the answer
-pipeline.  Tests can verify this cost contract by inspecting the call count on
-any injected LLM fake.
+The search route is a thin adapter over run_search_pipeline from
+beacon.retrieval.pipeline. It performs zero LLM calls.
 
-State seams (shared with /answer via ``build_evidence_bundle``):
-- ``app.state.embedder``: query-time embedder.  ``None`` (the lifespan default)
+State seams:
+- ``app.state.embedder``: query-time embedder. ``None`` (the lifespan default)
   means an ``EmbedderProvider`` is constructed lazily from settings on first
   use; tests inject a deterministic fake after the lifespan starts.
-
-The route is a thin adapter over the Task 03.1-03.3 pipeline functions
-(``HybridRetriever.search`` and ``assemble_evidence``); it re-implements no
-pipeline logic, so the in-process cost contracts hold identically over HTTP.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import datetime
-from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from beacon.ingest.embeddings import Embedder, EmbedderProvider
 from beacon.models import EvidenceBundle
-from beacon.retrieval.evidence import assemble_evidence
 from beacon.retrieval.filters import DateRange, FilterSpec
-from beacon.retrieval.hybrid import HybridRetriever
+from beacon.retrieval.pipeline import TOKEN_BUDGET, run_search_pipeline
 from beacon.server.telemetry import pipeline_span
-from beacon.storage.payload import chunk_id_to_point_id
-from beacon.storage.qdrant import QdrantStore
-
-TOKEN_BUDGET = 8192
-"""Evidence-assembly token budget shared by the search and answer routes."""
 
 router = APIRouter(tags=["search"])
 
@@ -74,8 +59,12 @@ class SearchRequest(BaseModel):
     query: str
     """Natural-language query string."""
 
-    top_k: int = Field(default=10, ge=1)
-    """Maximum number of evidence items to return."""
+    top_k: int | None = Field(default=None, ge=1)
+    """Maximum number of evidence items to return.
+
+    When None, uses ``RetrievalSettings.top_k`` from server config (default 10).
+    Explicit values override the config default.
+    """
 
     sources: list[str] = Field(default_factory=list)
     """Restrict results to these source URIs (OR semantics; empty means no filter)."""
@@ -94,7 +83,7 @@ class SearchRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Shared retrieval pipeline (used by /search and /answer)
+# Embedder resolution helper (shared by answer route)
 # ---------------------------------------------------------------------------
 
 
@@ -102,7 +91,7 @@ def _resolve_embedder(request: Request) -> Embedder:
     """Return the app's embedder, constructing the default provider lazily.
 
     Reads ``app.state.embedder`` (the injection seam set to ``None`` by the
-    lifespan).  When unset, constructs an ``EmbedderProvider`` from settings
+    lifespan). When unset, constructs an ``EmbedderProvider`` from settings
     and caches it on ``app.state`` so the mode-detection and any local model
     load happen once per process.
     """
@@ -117,118 +106,16 @@ def _resolve_embedder(request: Request) -> Embedder:
     return embedder
 
 
-def _make_fetch_chunk(
-    store: QdrantStore,
-    collection: str,
-) -> Callable[[str], dict[str, Any] | None]:
-    """Return a callable mapping hex chunk_id -> payload dict | None.
-
-    Implements the ``fetch_chunk`` seam of ``assemble_evidence``: the hex
-    chunk id is translated to its Qdrant point UUID and retrieved through the
-    store's typed boundary.  Missing chunks return ``None`` (the neighbor is
-    skipped); real Qdrant failures raise ``BackendError`` and surface as a
-    502 problem response.
-
-    Args:
-        store:      QdrantStore to retrieve from.
-        collection: Logical collection name (alias resolved inside the store).
-
-    Returns:
-        A callable suitable for the ``fetch_chunk`` argument of
-        ``assemble_evidence``.
-    """
-
-    def fetch_chunk(hex_chunk_id: str) -> dict[str, Any] | None:
-        point_id = chunk_id_to_point_id(hex_chunk_id)
-        return store.retrieve_payload(collection, point_id)
-
-    return fetch_chunk
-
-
-def build_evidence_bundle(
-    request: Request,
-    *,
-    collection: str,
-    query: str,
-    top_k: int,
-    sources: list[str],
-    tags: list[str],
-    created: DateRangeFilter | None = None,
-    modified: DateRangeFilter | None = None,
-    ingested: DateRangeFilter | None = None,
-) -> EvidenceBundle:
-    """Run the full retrieval pipeline for one query and return the bundle.
-
-    This is the single retrieval path shared by POST /search and POST /answer:
-    filter compilation, hybrid search, and budgeted evidence assembly.  It
-    performs zero LLM calls.
-
-    Args:
-        request:    FastAPI request (provides ``app.state``).
-        collection: Logical collection name.
-        query:      Natural-language query text.
-        top_k:      Maximum number of primary hits.
-        sources:    Source-URI restriction (empty means none).
-        tags:       Tag restriction (empty means none).
-        created:    Optional date-range filter on the source ``created_at`` field.
-        modified:   Optional date-range filter on the source ``modified_at`` field.
-        ingested:   Optional date-range filter on the pipeline ``ingested_at`` field.
-
-    Returns:
-        The assembled, labeled, budget-bounded EvidenceBundle.
-
-    Raises:
-        ReadinessError: When the collection is not READY (handled as a 503
-                        problem by the global error handlers).
-        BackendError:   On Qdrant or embedding-mode failures (502 problem).
-    """
-    state_db = request.app.state.state_db
-    qdrant_store: QdrantStore = request.app.state.qdrant_store
-    embedder = _resolve_embedder(request)
-
-    filter_spec = FilterSpec(
-        collection=collection,
-        source_uris=tuple(sources),
-        tags=tuple(tags),
-        created=created.to_date_range() if created is not None else None,
-        modified=modified.to_date_range() if modified is not None else None,
-        ingested=ingested.to_date_range() if ingested is not None else None,
-    )
-
-    retriever = HybridRetriever(
-        store=qdrant_store,
-        db=state_db,
-        embedder=embedder,
-    )
-
-    with pipeline_span("retrieval", collection=collection):
-        hits = retriever.search(
-            query_text=query,
-            filter_spec=filter_spec,
-            top_k=top_k,
-        )
-
-    fetch_chunk = _make_fetch_chunk(qdrant_store, collection)
-
-    with pipeline_span("evidence_assembly", collection=collection):
-        return assemble_evidence(
-            hits,
-            query,
-            fetch_chunk,
-            token_budget=TOKEN_BUDGET,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
 
 
-@router.post("/search", status_code=200)
-async def search(request: Request, body: SearchRequest) -> JSONResponse:
+@router.post("/search", status_code=200, response_model=EvidenceBundle)
+async def search(request: Request, body: SearchRequest) -> EvidenceBundle:
     """Hybrid search returning an EvidenceBundle.
 
-    Performs zero LLM calls.  The embedder is taken from ``app.state.embedder``
+    Performs zero LLM calls. The embedder is taken from ``app.state.embedder``
     when present, otherwise constructed lazily from settings.
 
     Args:
@@ -240,15 +127,32 @@ async def search(request: Request, body: SearchRequest) -> JSONResponse:
         provenance, scores, and the budget recap).
         503 problem+json if the collection is not ready (ReadinessError).
     """
-    bundle = build_evidence_bundle(
-        request,
+    settings = request.app.state.settings
+    resolved_top_k = body.top_k if body.top_k is not None else settings.retrieval.top_k
+
+    state_db = request.app.state.state_db
+    qdrant_store = request.app.state.qdrant_store
+    embedder = _resolve_embedder(request)
+
+    spec = FilterSpec(
         collection=body.collection,
-        query=body.query,
-        top_k=body.top_k,
-        sources=body.sources,
-        tags=body.tags,
-        created=body.created,
-        modified=body.modified,
-        ingested=body.ingested,
+        source_uris=tuple(body.sources),
+        tags=tuple(body.tags),
+        created=body.created.to_date_range() if body.created is not None else None,
+        modified=body.modified.to_date_range() if body.modified is not None else None,
+        ingested=body.ingested.to_date_range() if body.ingested is not None else None,
     )
-    return JSONResponse(content=bundle.model_dump(mode="json"), status_code=200)
+
+    with pipeline_span("retrieval", collection=body.collection):
+        with pipeline_span("evidence_assembly", collection=body.collection):
+            bundle = run_search_pipeline(
+                state_db=state_db,
+                store=qdrant_store,
+                embedder=embedder,
+                spec=spec,
+                query_text=body.query,
+                top_k=resolved_top_k,
+                token_budget=TOKEN_BUDGET,
+            )
+
+    return bundle

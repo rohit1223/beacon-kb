@@ -277,7 +277,8 @@ class Evidence(BaseModel):
         score:      Fused retrieval score for HIT items; ``None`` for CONTEXT.
         context_of: hex chunk_id of the primary HIT this span was expanded from;
                     ``None`` for primary HITs.
-        snippet:    Match-centered text excerpt with provenance.
+        snippet:    Match-centered text excerpt with provenance (display artifact).
+        text:       Full chunk text from the payload (what the model sees).
     """
 
     chunk_id: str
@@ -286,6 +287,16 @@ class Evidence(BaseModel):
     score: float | None = None
     context_of: str | None = None
     snippet: Snippet | None = None
+    text: str = ""
+    """Full chunk text from the payload.
+
+    This is the complete ``chunk_text`` from the chunk payload - NOT the
+    snippet-capped display excerpt in ``snippet.text``.  The answer pipeline
+    feeds ``text`` into the LLM prompt so the model sees the same content the
+    token budget accounting counted; ``BudgetRecap.tokens_packed`` therefore
+    describes what the model sees.  ``snippet.text`` remains the display
+    artifact for UI consumers.
+    """
 
 
 class BudgetRecap(BaseModel):
@@ -365,6 +376,8 @@ class AnswerDiagnostics(BaseModel):
         input_tokens:         Prompt token count reported by the provider (0 if unreported).
         output_tokens:        Completion token count reported by the provider (0 if unreported).
         elapsed_generation_s: Wall-clock seconds spent in the generation stage.
+        uncited_answer:       True when a non-abstained answer contains zero
+                              ``[S#]`` citation labels.
     """
 
     prompt_version: str
@@ -374,6 +387,15 @@ class AnswerDiagnostics(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     elapsed_generation_s: float = 0.0
+    uncited_answer: bool = False
+    """True when a non-abstained answer contains zero [S#] citation labels.
+
+    A non-abstained answer with no citations may indicate the model responded
+    from prior knowledge rather than grounding itself in the retrieved
+    evidence.  Tracked as a diagnostic flag for the Epic 06 RAGAS-based
+    quality evaluation (see ROADMAP).  Always False on abstention (abstained
+    results carry empty answer text by construction).
+    """
 
 
 class AnswerResult(BaseModel):

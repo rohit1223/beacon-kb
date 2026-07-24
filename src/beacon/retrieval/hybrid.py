@@ -183,6 +183,20 @@ class HybridRetriever:
 
         query_filter = compile_filter(filter_spec)
 
+        # Hoist collection-existence check for BOTH dense and sparse-only modes.
+        # Previously, _check_dense_dimension (called only in the dense branch) raised
+        # BackendError when the physical collection was missing, but sparse-only
+        # searches called the executor directly and returned empty results silently.
+        # Now both modes fail with a typed BackendError when the live revision points
+        # at a missing physical collection.
+        physical = self._store.resolve_alias(collection)
+        target = physical if physical is not None else collection
+        if self._store.collection_info(target) is None:
+            raise BackendError(
+                f"Collection {collection!r} has a live revision but no "
+                f"queryable Qdrant collection ({target!r})"
+            )
+
         embedding = self._embedder.embed([query_text])[0]
         sparse: qmodels.SparseVector | None = None
         if embedding.sparse_indices:

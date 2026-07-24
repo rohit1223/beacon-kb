@@ -264,6 +264,11 @@ def run_answer(
     elapsed = time.monotonic() - t_start
 
     # Stage 3: Post-generation abstention gate.
+    # is_post_abstain checks for the exact ABSTAIN sentinel string (case-sensitive,
+    # stripped) or an empty/whitespace-only response. The exact-sentinel check is
+    # intentional: a real answer that merely mentions the word "ABSTAIN" in prose
+    # is not silenced (the check is ``stripped == ABSTAIN_SENTINEL``, not
+    # ``ABSTAIN_SENTINEL in stripped``). This binding is enforced in abstention.py.
     if is_post_abstain(response.text):
         return _abstained_result(
             bundle,
@@ -283,6 +288,10 @@ def run_answer(
     citations = resolve_citations(response.text, bundle)
 
     # Stage 5: Assemble the grounded result.
+    # Diagnostic: flag when a non-abstained answer has zero inline citations.
+    # Zero citations on a non-abstained answer may indicate the model responded
+    # from prior knowledge. See AnswerDiagnostics.uncited_answer for details.
+    uncited = len(citations) == 0
     diagnostics = AnswerDiagnostics(
         prompt_version=PROMPT_VERSION,
         model=model,
@@ -291,6 +300,7 @@ def run_answer(
         input_tokens=response.input_tokens,
         output_tokens=response.output_tokens,
         elapsed_generation_s=elapsed,
+        uncited_answer=uncited,
     )
     return AnswerResult(
         answer_text=response.text,
@@ -309,12 +319,16 @@ def run_answer(
 def _build_messages(bundle: EvidenceBundle, query_text: str) -> list[dict[str, str]]:
     """Build the chat messages: trusted system prompt, then delimiter-wrapped context.
 
+    Context is built from ``ev.text`` (the full chunk text stored at assembly time),
+    NOT from ``ev.snippet.text`` (the 400-char display excerpt). This ensures the
+    model sees the complete chunk content the token budget accounting already counted.
+    ``BudgetRecap.tokens_packed`` therefore describes what the model actually sees.
     Only primary HIT evidence and its expanded CONTEXT spans are labelled for the
     model; every evidence text is neutralized and wrapped in untrusted-context
     delimiters by ``build_context_block``.
     """
     evidence_texts: list[tuple[str, str]] = [
-        (ev.label, ev.snippet.text if ev.snippet is not None else "")
+        (ev.label, ev.text)
         for ev in bundle.evidence
     ]
     context_block = build_context_block(evidence_texts)

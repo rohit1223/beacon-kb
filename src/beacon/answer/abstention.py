@@ -15,6 +15,13 @@ retrieval pipeline (Task 03.1): Qdrant native RRF fused scores are bounded by
 so normal fused scores never spuriously abstain - the v1 bug where a 0.5
 default silenced every hybrid answer before the model was ever called.
 
+Score scales: the pre-abstention threshold operates on two different score
+scales depending on retrieval mode. In hybrid (dense+sparse) mode, Qdrant
+native RRF fused scores are bounded by 2/k (approx 0.033 at k=60). In
+sparse-only degraded mode, raw TF sparse scores are unbounded and typically
+larger. Set ``abstain_threshold`` accordingly for each mode; a value tuned
+for hybrid scores will behave differently against sparse-only scores.
+
 POST-generation abstention converts provider output to a safe abstention when
 the model returns the sentinel word "ABSTAIN" (exact, after stripping) or an
 empty answer.

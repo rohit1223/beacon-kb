@@ -93,7 +93,6 @@ def _count_tokens(text: str) -> int:
 
 
 def _resolve_neighbors(
-    chunk_id: str,
     payload: dict[str, Any],
     fetch_chunk: Callable[[str], dict[str, Any] | None],
     *,
@@ -110,7 +109,6 @@ def _resolve_neighbors(
     dict (or None).
 
     Args:
-        chunk_id:    Hex chunk id of the primary hit.
         payload:     Payload dict of the primary hit.
         fetch_chunk: Callable mapping hex chunk id -> payload dict | None.
         max_hops:    Maximum hops in each direction.
@@ -232,7 +230,6 @@ def assemble_evidence(
 
     for primary_cid, primary_payload, _ in surviving_primary:
         neighbors = _resolve_neighbors(
-            primary_cid,
             primary_payload,
             fetch_chunk,
             max_hops=max_neighbor_hops,
@@ -259,6 +256,12 @@ def assemble_evidence(
     label_counter = 1
 
     # Primary hits first.
+    # Evidence.score vs rerank ordering: ``score`` carries the fused (RRF or
+    # single-branch) score from retrieval as provenance.  When a cross-encoder
+    # reranker ran, the hits arrive here already re-sorted by rerank_score, so
+    # the bundle ORDER reflects the reranker's final ranking while ``score``
+    # still holds the fused score.  Scores may therefore be non-monotonic in
+    # bundle order after reranking; that is expected, not a bug.
     for chunk_id, payload, fused_score in surviving_primary:
         snippet = _build_snippet_from_payload(chunk_id, payload, query_text)
         ev = Evidence(
@@ -268,6 +271,7 @@ def assemble_evidence(
             score=fused_score,
             context_of=None,
             snippet=snippet,
+            text=str(payload.get("chunk_text", "")),
         )
         all_evidence.append(ev)
         label_counter += 1
@@ -282,6 +286,7 @@ def assemble_evidence(
             score=None,
             context_of=primary_cid,
             snippet=snippet,
+            text=str(neighbor_payload.get("chunk_text", "")),
         )
         all_evidence.append(ev)
         label_counter += 1
