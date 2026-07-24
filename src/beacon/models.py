@@ -321,3 +321,79 @@ class EvidenceBundle(BaseModel):
 
     evidence: list[Evidence] = Field(default_factory=list)
     recap: BudgetRecap
+
+
+# ---------------------------------------------------------------------------
+# Answer schemas (Task 03.3)
+# ---------------------------------------------------------------------------
+
+
+class Citation(BaseModel):
+    """A resolved, structurally validated citation.
+
+    Produced only after the cited ``[S#]`` label has been resolved against the
+    canonical evidence bundle held by the server.  A Citation never originates
+    from content echoed back by the model; it references the server-held
+    evidence by its hex ``chunk_id`` and carries the real provenance URI.
+
+    Attributes:
+        label:      The citation label as it appears in the answer (e.g. ``S1``).
+        chunk_id:   Hex chunk id of the cited evidence item (from the bundle).
+        source_uri: Canonical source URI resolved from the evidence snippet.
+        excerpt:    Short provenance excerpt from the evidence snippet.
+    """
+
+    label: str
+    chunk_id: str
+    source_uri: str
+    excerpt: str
+
+
+class AnswerDiagnostics(BaseModel):
+    """Diagnostics captured during a single answer run.
+
+    Records prompt version, provider model, evidence count, timings, and token
+    counts.  Never records secrets (API keys, credentials, raw provider errors).
+
+    Attributes:
+        prompt_version:       Stable version string from ``answer.prompts.PROMPT_VERSION``.
+        model:                Configured LiteLLM model name for this run.
+        evidence_count:       Count of HIT items only (context spans excluded) in the bundle.
+                              Counts primary retrieval results that carry relevance scores;
+                              context spans added by neighbor expansion are not included.
+        abstained:            Whether the run produced an abstention.
+        input_tokens:         Prompt token count reported by the provider (0 if unreported).
+        output_tokens:        Completion token count reported by the provider (0 if unreported).
+        elapsed_generation_s: Wall-clock seconds spent in the generation stage.
+    """
+
+    prompt_version: str
+    model: str
+    evidence_count: int
+    abstained: bool
+    input_tokens: int = 0
+    output_tokens: int = 0
+    elapsed_generation_s: float = 0.0
+
+
+class AnswerResult(BaseModel):
+    """The complete result of one grounded answer run.
+
+    Preserves the answer text, the resolved citations, the canonical evidence
+    bundle the answer was grounded against, and the diagnostics.  On any
+    abstention (pre or post) ``answer_text`` is empty, ``abstained`` is True,
+    and ``citations`` is empty.
+
+    Attributes:
+        answer_text: Grounded answer text, or ``""`` on abstention.
+        citations:   Resolved citations (empty on abstention).
+        evidence:    The canonical EvidenceBundle the answer was grounded against.
+        abstained:   True when the run abstained (pre or post generation).
+        diagnostics: Prompt version, model, timings, and token counts.
+    """
+
+    answer_text: str
+    citations: tuple[Citation, ...] = ()
+    evidence: EvidenceBundle
+    abstained: bool
+    diagnostics: AnswerDiagnostics
