@@ -240,6 +240,7 @@ def run_answer(
             input_tokens=0,
             output_tokens=0,
             elapsed=time.monotonic() - t_start,
+            reason="pre_abstention: no evidence above threshold",
         )
 
     # Stage 2: Build the prompt and make EXACTLY ONE provider call.
@@ -271,6 +272,7 @@ def run_answer(
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
             elapsed=elapsed,
+            reason="post_abstention: model declined",
         )
 
     # Stage 4: Citation validation against the canonical bundle (never model echo).
@@ -331,8 +333,19 @@ def _abstained_result(
     input_tokens: int,
     output_tokens: int,
     elapsed: float,
+    reason: str,
 ) -> AnswerResult:
-    """Build a safe abstained AnswerResult with empty answer text and citations."""
+    """Build a safe abstained AnswerResult with empty answer text and citations.
+
+    Args:
+        bundle:         Evidence bundle included in the result (may be empty).
+        model:          LLM model name for diagnostics.
+        evidence_count: Number of primary HIT evidence items.
+        input_tokens:   Prompt token count (0 on pre-abstention).
+        output_tokens:  Completion token count (0 on pre-abstention).
+        elapsed:        Wall-clock seconds from run_answer entry to this point.
+        reason:         Machine-readable abstention reason string.
+    """
     diagnostics = AnswerDiagnostics(
         prompt_version=PROMPT_VERSION,
         model=model,
@@ -347,5 +360,6 @@ def _abstained_result(
         citations=(),
         evidence=bundle,
         abstained=True,
+        reason=reason,
         diagnostics=diagnostics,
     )

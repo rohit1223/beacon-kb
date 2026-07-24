@@ -389,6 +389,11 @@ class AnswerResult(BaseModel):
         citations:   Resolved citations (empty on abstention).
         evidence:    The canonical EvidenceBundle the answer was grounded against.
         abstained:   True when the run abstained (pre or post generation).
+        reason:      Machine-readable abstention reason when abstained is True,
+                     ``None`` on a normal (non-abstained) answer.
+                     ``"pre_abstention: no evidence above threshold"`` when the
+                     pre-abstention gate fired; ``"post_abstention: model declined"``
+                     when the model returned the ABSTAIN sentinel.
         diagnostics: Prompt version, model, timings, and token counts.
     """
 
@@ -396,4 +401,5 @@ class AnswerResult(BaseModel):
     citations: tuple[Citation, ...] = ()
     evidence: EvidenceBundle
     abstained: bool
+    reason: str | None = None
     diagnostics: AnswerDiagnostics

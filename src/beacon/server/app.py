@@ -27,9 +27,11 @@ from fastapi import FastAPI
 
 from beacon.config import BeaconSettings
 from beacon.server.error_handlers import register_error_handlers
+from beacon.server.routes.answer import router as answer_router
 from beacon.server.routes.collections import router as collections_router
 from beacon.server.routes.documents import router as documents_router
 from beacon.server.routes.health import router as health_router
+from beacon.server.routes.search import router as search_router
 from beacon.server.routes.sync import router as sync_router
 from beacon.server.telemetry import instrument_app
 
@@ -78,6 +80,17 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     qdrant_store = QdrantStore(settings)
     app.state.qdrant_store = qdrant_store
+
+    # LLM client seam: None means the answer route will create a LiteLlmClient
+    # lazily per request.  Tests may replace this with a fake after startup.
+    # Only set if not already set (allows pre-startup injection in tests).
+    if not hasattr(app.state, "llm_client"):
+        app.state.llm_client = None
+
+    # Embedder seam: None means the search/answer routes will create an
+    # EmbedderProvider lazily.  Tests may inject a sparse-only fake here.
+    if not hasattr(app.state, "embedder"):
+        app.state.embedder = None
 
     try:
         yield
@@ -135,6 +148,8 @@ def create_app(settings: BeaconSettings | None = None) -> FastAPI:
     app.include_router(collections_router)
     app.include_router(documents_router)
     app.include_router(sync_router)
+    app.include_router(search_router)
+    app.include_router(answer_router)
 
     # Wire up OTel instrumentation (no-op when OTel not configured).
     instrument_app(app, settings=settings)

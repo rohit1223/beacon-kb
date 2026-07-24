@@ -479,6 +479,54 @@ class QdrantStore:
         except Exception as exc:
             raise BackendError(f"Failed to query '{collection_name}': {exc}") from exc
 
+    def retrieve_payload(
+        self,
+        collection_name: str,
+        point_id: str,
+    ) -> dict[str, Any] | None:
+        """Retrieve the payload of a single point by its Qdrant point id.
+
+        ``collection_name`` may be a logical alias or a physical collection
+        name; aliases are resolved before retrieval.  A missing collection or
+        missing point returns ``None`` rather than raising, so callers such as
+        neighbor expansion can skip unavailable chunks without special-casing.
+
+        Args:
+            collection_name: Logical alias or physical collection name.
+            point_id:        Qdrant point id (UUID string).
+
+        Returns:
+            The point's payload dict, or ``None`` when the collection or the
+            point does not exist.
+
+        Raises:
+            BackendError: On any Qdrant failure other than a missing point.
+        """
+        physical = self.resolve_alias(collection_name)
+        target = physical if physical is not None else collection_name
+
+        try:
+            if not self._client.collection_exists(target):
+                return None
+            records = self._client.retrieve(
+                collection_name=target,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(
+                f"Failed to retrieve point {point_id!r} from "
+                f"'{collection_name}': {exc}"
+            ) from exc
+
+        if not records:
+            return None
+        payload = records[0].payload
+        return dict(payload) if payload is not None else None
+
     def query_hybrid(self, request: HybridQueryRequest) -> list[QueryResult]:
         """Execute one hybrid Query API request against Qdrant.
 

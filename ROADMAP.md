@@ -5,6 +5,8 @@ Each entry records what is missing, why it was deferred, and which epic will add
 
 ## Deferred items
 
+- TOKEN_BUDGET config field: the 8192-token evidence-assembly budget is currently a module constant in ``src/beacon/server/routes/search.py``; promote it to a ``RetrievalSettings`` (or new ``ServerSettings``) field so operators can tune the cap without a code change (Epic 06).
+- [DONE - Task 03.4 fix round 1] AnswerResult.reason field: ``AnswerResult`` gains a ``reason: str | None`` field populated on abstention (``"pre_abstention: no evidence above threshold"`` or ``"post_abstention: model declined"``), ``None`` on a normal answer. The /answer route serializes it. Tests assert the correct string on both paths and None on a normal answer.
 - [TASK 02.3] PDF CI gate: CI pipeline must pre-download Docling layout and table model artifacts into the model cache, set BEACON_PDF_MODELS_AVAILABLE=1 environment variable, and run pytest so the two guarded PDF tests in tests/beacon/integration/test_parsing.py execute; this confirms offline parsing (Markdown, HTML, DOCX) and validates PDF conversion once models are available.
 - [DONE - Task 03.1.3] Query.top_k vs config.retrieval.top_k reconciliation - per-query top_k overrides config when it differs from the default (10); documented in pipeline.py at _resolve_top_k().
 - StopCondition trace parameter typing to AgenticTrace - the current `Any` annotation should be narrowed once the contract suite and fakes feed real AgenticTrace values instead of None/dict placeholders (Epic 04).
