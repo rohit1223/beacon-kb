@@ -2,11 +2,16 @@
 
 Domain-specific route schemas for collection create/list/detail are defined
 here as introduced by Task 01.5.
+
+Evidence and EvidenceBundle schemas (Task 03.2) are the canonical evidence
+input for citation validation (Task 03.3) and the POST /search response shape
+(Task 03.4).
 """
 
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -207,3 +212,112 @@ class DocumentUploadResponse(BaseModel):
 
     media_type: str
     """Detected media type for the uploaded file."""
+
+
+# ---------------------------------------------------------------------------
+# Evidence schemas (Task 03.2)
+# ---------------------------------------------------------------------------
+
+
+class EvidenceRole(StrEnum):
+    """Role of an evidence item in the bundle."""
+
+    HIT = "hit"
+    """Primary retrieval hit - ranked and scored by the retrieval pipeline."""
+
+    CONTEXT = "context"
+    """Context span added by neighbor expansion - no relevance score."""
+
+
+class Snippet(BaseModel):
+    """Match-centered text excerpt with provenance from the source payload.
+
+    Attributes:
+        text:         Extracted text excerpt, centered on the query match.
+        source_uri:   Canonical source URI (never an internal hash).
+        title:        Human-readable document title.
+        heading_path: Ordered list of heading components from the payload.
+        locator:      Structural locator (heading path or page number string).
+        chunk_id:     Chunk identifier for traceability.
+        char_start:   0-based start offset of ``text`` within the full chunk text.
+        char_end:     0-based exclusive end offset of ``text`` within the full chunk text.
+    """
+
+    text: str
+    source_uri: str
+    title: str
+    heading_path: list[str]
+    locator: str
+    chunk_id: str
+    char_start: int
+    char_end: int
+
+
+class Evidence(BaseModel):
+    """One evidence item in an EvidenceBundle.
+
+    Primary hits carry a fused relevance score from the retrieval pipeline.
+    Context spans (neighbor-expanded chunks) carry no score (``score=None``)
+    and reference the primary hit they were expanded from via ``context_of``.
+
+    Canonical identity
+    ------------------
+    ``chunk_id`` is always the **hex chunk id**: the 64-character SHA-256 hex
+    string stored in the payload field ``chunk_hash``.  It is NOT a Qdrant
+    point UUID.  This format is shared by payload navigation fields
+    ``prev_chunk_id`` / ``next_chunk_id``, so the dedup set and the neighbor
+    chain operate in the same key space and intersect correctly.
+
+    Attributes:
+        chunk_id:   Hex chunk id (64-char SHA-256 from payload ``chunk_hash``).
+                    Never a Qdrant point UUID.
+        label:      Stable, gap-free citation label (S1, S2, ...).
+        role:       ``hit`` for primary retrieval results; ``context`` for
+                    neighbor-expanded spans.
+        score:      Fused retrieval score for HIT items; ``None`` for CONTEXT.
+        context_of: hex chunk_id of the primary HIT this span was expanded from;
+                    ``None`` for primary HITs.
+        snippet:    Match-centered text excerpt with provenance.
+    """
+
+    chunk_id: str
+    label: str
+    role: EvidenceRole
+    score: float | None = None
+    context_of: str | None = None
+    snippet: Snippet | None = None
+
+
+class BudgetRecap(BaseModel):
+    """Token budget accounting for one evidence assembly run.
+
+    Attributes:
+        requested:    Number of primary hits provided to the assembler.
+        packed:       Number of primary hits that fit within the budget.
+        skipped:      Number of primary hits excluded due to budget overflow.
+        tokens_packed: Total heuristic token count of all packed evidence (primary + context).
+        token_budget: The original token budget.
+    """
+
+    requested: int
+    packed: int
+    skipped: int
+    tokens_packed: int
+    token_budget: int
+
+
+class EvidenceBundle(BaseModel):
+    """The complete, budget-bounded evidence set for one search result.
+
+    Primary hits are packed before context spans.
+    Labels are stable, gap-free S1..Sn assigned only after budget packing.
+    This is the canonical input for citation validation (Task 03.3) and
+    the POST /search response shape (Task 03.4).
+
+    Attributes:
+        evidence: Ordered list of evidence items (primary HITs then CONTEXT spans).
+        recap:    Token budget accounting for this assembly run.
+    """
+
+    evidence: list[Evidence] = Field(default_factory=list)
+    recap: BudgetRecap
