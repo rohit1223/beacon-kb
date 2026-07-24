@@ -2,11 +2,16 @@
 
 Domain-specific route schemas for collection create/list/detail are defined
 here as introduced by Task 01.5.
+
+Evidence and EvidenceBundle schemas (Task 03.2) are the canonical evidence
+input for citation validation (Task 03.3) and the POST /search response shape
+(Task 03.4).
 """
 
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -207,3 +212,216 @@ class DocumentUploadResponse(BaseModel):
 
     media_type: str
     """Detected media type for the uploaded file."""
+
+
+# ---------------------------------------------------------------------------
+# Evidence schemas (Task 03.2)
+# ---------------------------------------------------------------------------
+
+
+class EvidenceRole(StrEnum):
+    """Role of an evidence item in the bundle."""
+
+    HIT = "hit"
+    """Primary retrieval hit - ranked and scored by the retrieval pipeline."""
+
+    CONTEXT = "context"
+    """Context span added by neighbor expansion - no relevance score."""
+
+
+class Snippet(BaseModel):
+    """Match-centered text excerpt with provenance from the source payload.
+
+    Attributes:
+        text:         Extracted text excerpt, centered on the query match.
+        source_uri:   Canonical source URI (never an internal hash).
+        title:        Human-readable document title.
+        heading_path: Ordered list of heading components from the payload.
+        locator:      Structural locator (heading path or page number string).
+        chunk_id:     Chunk identifier for traceability.
+        char_start:   0-based start offset of ``text`` within the full chunk text.
+        char_end:     0-based exclusive end offset of ``text`` within the full chunk text.
+    """
+
+    text: str
+    source_uri: str
+    title: str
+    heading_path: list[str]
+    locator: str
+    chunk_id: str
+    char_start: int
+    char_end: int
+
+
+class Evidence(BaseModel):
+    """One evidence item in an EvidenceBundle.
+
+    Primary hits carry a fused relevance score from the retrieval pipeline.
+    Context spans (neighbor-expanded chunks) carry no score (``score=None``)
+    and reference the primary hit they were expanded from via ``context_of``.
+
+    Canonical identity
+    ------------------
+    ``chunk_id`` is always the **hex chunk id**: the 64-character SHA-256 hex
+    string stored in the payload field ``chunk_hash``.  It is NOT a Qdrant
+    point UUID.  This format is shared by payload navigation fields
+    ``prev_chunk_id`` / ``next_chunk_id``, so the dedup set and the neighbor
+    chain operate in the same key space and intersect correctly.
+
+    Attributes:
+        chunk_id:   Hex chunk id (64-char SHA-256 from payload ``chunk_hash``).
+                    Never a Qdrant point UUID.
+        label:      Stable, gap-free citation label (S1, S2, ...).
+        role:       ``hit`` for primary retrieval results; ``context`` for
+                    neighbor-expanded spans.
+        score:      Fused retrieval score for HIT items; ``None`` for CONTEXT.
+        context_of: hex chunk_id of the primary HIT this span was expanded from;
+                    ``None`` for primary HITs.
+        snippet:    Match-centered text excerpt with provenance (display artifact).
+        text:       Full chunk text from the payload (what the model sees).
+    """
+
+    chunk_id: str
+    label: str
+    role: EvidenceRole
+    score: float | None = None
+    context_of: str | None = None
+    snippet: Snippet | None = None
+    text: str = ""
+    """Full chunk text from the payload.
+
+    This is the complete ``chunk_text`` from the chunk payload - NOT the
+    snippet-capped display excerpt in ``snippet.text``.  The answer pipeline
+    feeds ``text`` into the LLM prompt so the model sees the same content the
+    token budget accounting counted; ``BudgetRecap.tokens_packed`` therefore
+    describes what the model sees.  ``snippet.text`` remains the display
+    artifact for UI consumers.
+    """
+
+
+class BudgetRecap(BaseModel):
+    """Token budget accounting for one evidence assembly run.
+
+    Attributes:
+        requested:    Number of primary hits provided to the assembler.
+        packed:       Number of primary hits that fit within the budget.
+        skipped:      Number of primary hits excluded due to budget overflow.
+        tokens_packed: Total heuristic token count of all packed evidence (primary + context).
+        token_budget: The original token budget.
+    """
+
+    requested: int
+    packed: int
+    skipped: int
+    tokens_packed: int
+    token_budget: int
+
+
+class EvidenceBundle(BaseModel):
+    """The complete, budget-bounded evidence set for one search result.
+
+    Primary hits are packed before context spans.
+    Labels are stable, gap-free S1..Sn assigned only after budget packing.
+    This is the canonical input for citation validation (Task 03.3) and
+    the POST /search response shape (Task 03.4).
+
+    Attributes:
+        evidence: Ordered list of evidence items (primary HITs then CONTEXT spans).
+        recap:    Token budget accounting for this assembly run.
+    """
+
+    evidence: list[Evidence] = Field(default_factory=list)
+    recap: BudgetRecap
+
+
+# ---------------------------------------------------------------------------
+# Answer schemas (Task 03.3)
+# ---------------------------------------------------------------------------
+
+
+class Citation(BaseModel):
+    """A resolved, structurally validated citation.
+
+    Produced only after the cited ``[S#]`` label has been resolved against the
+    canonical evidence bundle held by the server.  A Citation never originates
+    from content echoed back by the model; it references the server-held
+    evidence by its hex ``chunk_id`` and carries the real provenance URI.
+
+    Attributes:
+        label:      The citation label as it appears in the answer (e.g. ``S1``).
+        chunk_id:   Hex chunk id of the cited evidence item (from the bundle).
+        source_uri: Canonical source URI resolved from the evidence snippet.
+        excerpt:    Short provenance excerpt from the evidence snippet.
+    """
+
+    label: str
+    chunk_id: str
+    source_uri: str
+    excerpt: str
+
+
+class AnswerDiagnostics(BaseModel):
+    """Diagnostics captured during a single answer run.
+
+    Records prompt version, provider model, evidence count, timings, and token
+    counts.  Never records secrets (API keys, credentials, raw provider errors).
+
+    Attributes:
+        prompt_version:       Stable version string from ``answer.prompts.PROMPT_VERSION``.
+        model:                Configured LiteLLM model name for this run.
+        evidence_count:       Count of HIT items only (context spans excluded) in the bundle.
+                              Counts primary retrieval results that carry relevance scores;
+                              context spans added by neighbor expansion are not included.
+        abstained:            Whether the run produced an abstention.
+        input_tokens:         Prompt token count reported by the provider (0 if unreported).
+        output_tokens:        Completion token count reported by the provider (0 if unreported).
+        elapsed_generation_s: Wall-clock seconds spent in the generation stage.
+        uncited_answer:       True when a non-abstained answer contains zero
+                              ``[S#]`` citation labels.
+    """
+
+    prompt_version: str
+    model: str
+    evidence_count: int
+    abstained: bool
+    input_tokens: int = 0
+    output_tokens: int = 0
+    elapsed_generation_s: float = 0.0
+    uncited_answer: bool = False
+    """True when a non-abstained answer contains zero [S#] citation labels.
+
+    A non-abstained answer with no citations may indicate the model responded
+    from prior knowledge rather than grounding itself in the retrieved
+    evidence.  Tracked as a diagnostic flag for the Epic 06 RAGAS-based
+    quality evaluation (see ROADMAP).  Always False on abstention (abstained
+    results carry empty answer text by construction).
+    """
+
+
+class AnswerResult(BaseModel):
+    """The complete result of one grounded answer run.
+
+    Preserves the answer text, the resolved citations, the canonical evidence
+    bundle the answer was grounded against, and the diagnostics.  On any
+    abstention (pre or post) ``answer_text`` is empty, ``abstained`` is True,
+    and ``citations`` is empty.
+
+    Attributes:
+        answer_text: Grounded answer text, or ``""`` on abstention.
+        citations:   Resolved citations (empty on abstention).
+        evidence:    The canonical EvidenceBundle the answer was grounded against.
+        abstained:   True when the run abstained (pre or post generation).
+        reason:      Machine-readable abstention reason when abstained is True,
+                     ``None`` on a normal (non-abstained) answer.
+                     ``"pre_abstention: no evidence above threshold"`` when the
+                     pre-abstention gate fired; ``"post_abstention: model declined"``
+                     when the model returned the ABSTAIN sentinel.
+        diagnostics: Prompt version, model, timings, and token counts.
+    """
+
+    answer_text: str
+    citations: tuple[Citation, ...] = ()
+    evidence: EvidenceBundle
+    abstained: bool
+    reason: str | None = None
+    diagnostics: AnswerDiagnostics

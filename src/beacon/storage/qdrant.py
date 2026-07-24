@@ -22,6 +22,7 @@ logical name with no alias returns an empty list rather than raising.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from qdrant_client import QdrantClient
@@ -63,6 +64,44 @@ class QueryResult:
         if raw is None:
             return None
         return dict(raw)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid query request
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HybridQueryRequest:
+    """One fully compiled Qdrant Query API request for a hybrid search.
+
+    Built by the retrieval pipeline *after* the ``FilterSpec`` has been
+    compiled: the payload filter is embedded in every prefetch branch and at
+    the top level, so any executor implementation that runs this request
+    operates under the compiled filter by construction.
+
+    Two forms exist:
+
+    - **Hybrid**: ``prefetch`` holds the dense and sparse branches and
+      ``query`` is a ``FusionQuery`` (native RRF); ``using`` is ``None``.
+    - **Sparse-only (degraded)**: ``prefetch`` is empty, ``query`` is the
+      sparse query vector, and ``using`` names the sparse vector.
+
+    Attributes:
+        collection_name: Logical alias or physical collection to query.
+        prefetch:        Prefetch branches (empty for sparse-only).
+        query:           Fusion directive or the sparse query vector.
+        using:           Named vector for the direct query form, else ``None``.
+        query_filter:    Compiled payload filter applied inside Qdrant.
+        limit:           Maximum number of fused results.
+    """
+
+    collection_name: str
+    prefetch: tuple[qmodels.Prefetch, ...]
+    query: qmodels.FusionQuery | qmodels.SparseVector
+    using: str | None
+    query_filter: qmodels.Filter | None
+    limit: int
 
 
 # ---------------------------------------------------------------------------
@@ -439,3 +478,97 @@ class QdrantStore:
             raise
         except Exception as exc:
             raise BackendError(f"Failed to query '{collection_name}': {exc}") from exc
+
+    def retrieve_payload(
+        self,
+        collection_name: str,
+        point_id: str,
+    ) -> dict[str, Any] | None:
+        """Retrieve the payload of a single point by its Qdrant point id.
+
+        ``collection_name`` may be a logical alias or a physical collection
+        name; aliases are resolved before retrieval.  A missing collection or
+        missing point returns ``None`` rather than raising, so callers such as
+        neighbor expansion can skip unavailable chunks without special-casing.
+
+        Args:
+            collection_name: Logical alias or physical collection name.
+            point_id:        Qdrant point id (UUID string).
+
+        Returns:
+            The point's payload dict, or ``None`` when the collection or the
+            point does not exist.
+
+        Raises:
+            BackendError: On any Qdrant failure other than a missing point.
+        """
+        physical = self.resolve_alias(collection_name)
+        target = physical if physical is not None else collection_name
+
+        try:
+            if not self._client.collection_exists(target):
+                return None
+            records = self._client.retrieve(
+                collection_name=target,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(
+                f"Failed to retrieve point {point_id!r} from "
+                f"'{collection_name}': {exc}"
+            ) from exc
+
+        if not records:
+            return None
+        payload = records[0].payload
+        return dict(payload) if payload is not None else None
+
+    def query_hybrid(self, request: HybridQueryRequest) -> list[QueryResult]:
+        """Execute one hybrid Query API request against Qdrant.
+
+        Issues exactly one ``query_points`` call.  For the hybrid form the
+        request carries dense and sparse prefetch branches fused with a
+        native ``FusionQuery``; for the sparse-only degraded form it carries
+        a single sparse query with no prefetch.  In both forms the compiled
+        payload filter inside ``request`` is applied by Qdrant itself.
+
+        ``request.collection_name`` may be a logical alias or a physical
+        collection name; aliases are resolved before querying.  A missing
+        collection returns an empty list rather than raising, matching
+        ``query``.
+
+        Args:
+            request: The fully compiled hybrid query request.
+
+        Returns:
+            Scored points wrapped as ``QueryResult`` records.
+
+        Raises:
+            BackendError: On any Qdrant failure.
+        """
+        physical = self.resolve_alias(request.collection_name)
+        target = physical if physical is not None else request.collection_name
+
+        try:
+            if not self._client.collection_exists(target):
+                return []
+            results = self._client.query_points(
+                collection_name=target,
+                prefetch=list(request.prefetch) if request.prefetch else None,
+                query=request.query,
+                using=request.using,
+                query_filter=request.query_filter,
+                limit=request.limit,
+                with_payload=True,
+            )
+            return [QueryResult(p) for p in results.points]
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(
+                f"Failed hybrid query on '{request.collection_name}': {exc}"
+            ) from exc

@@ -25,10 +25,10 @@
 - [x] 9. EPIC-02 TASK-02.4 [M | 5f | ~450 LOC] Hierarchical chunking with parent/child links and heading paths - depends: 02.3
 - [x] 10. EPIC-02 TASK-02.5 [L | 10f | ~700 LOC] Embeddings auto-detect and the incremental sync engine with staged promotion - depends: 02.2, 02.4
   ↳ End of Epic 02 (branch PR: ingestion wave 1; ported sync regression suites green)
-- [ ] 11. EPIC-03 TASK-03.1 [L | 7f | ~550 LOC] Hybrid retrieval with enforced payload filters and optional rerank - depends: 02.5
-- [ ] 12. EPIC-03 TASK-03.2 [M | 5f | ~500 LOC] Evidence assembly with expansion, budgets, labels, and snippets - depends: 03.1
-- [ ] 13. EPIC-03 TASK-03.3 [L | 8f | ~650 LOC] Grounded answer with abstention, injection defense, and citation validation - depends: 03.2
-- [ ] 14. EPIC-03 TASK-03.4 [M | 6f | ~500 LOC] REST search and answer with cost-contract, recall, and smoke tests - depends: 03.3
+- [x] 11. EPIC-03 TASK-03.1 [L | 7f | ~550 LOC] Hybrid retrieval with enforced payload filters and optional rerank - depends: 02.5
+- [x] 12. EPIC-03 TASK-03.2 [M | 5f | ~500 LOC] Evidence assembly with expansion, budgets, labels, and snippets - depends: 03.1
+- [x] 13. EPIC-03 TASK-03.3 [L | 8f | ~650 LOC] Grounded answer with abstention, injection defense, and citation validation - depends: 03.2
+- [x] 14. EPIC-03 TASK-03.4 [M | 6f | ~500 LOC] REST search and answer with cost-contract, recall, and smoke tests - depends: 03.3
   ↳ End of Epic 03 (branch PR: retrieval and grounded answers; parallel tracks unlock)
 
 ### Track 2: MCP and CLI (Epic 04 - depends: Epic 03 complete; parallel worktree)

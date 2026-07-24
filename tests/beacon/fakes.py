@@ -13,6 +13,12 @@ from beacon.ingest.connectors.base import (
 )
 from beacon.ingest.embeddings import EmbedderMode, EmbeddingResult, compute_sparse
 
+__all__ = [
+    "FakeConnector",
+    "FakeEmbedder",
+    "SparseOnlyFakeEmbedder",
+]
+
 
 class FakeEmbedder:
     """Deterministic fake embedder for tests.
@@ -76,6 +82,44 @@ class FakeEmbedder:
         """Reset call and embed counters to zero."""
         self.call_count = 0
         self.embed_count = 0
+
+
+class SparseOnlyFakeEmbedder:
+    """Deterministic sparse-only embedder for tests (no dense vectors).
+
+    Useful for route-level integration tests that need a real embedder seam
+    but must not depend on any dense model.  The sparse vectors are produced
+    by the production ``compute_sparse`` function, so they are stable and
+    reproducible across test runs.
+
+    Args:
+        model_name: Model name string reported via ``self.model_name`` and the
+                    fingerprint.  Defaults to ``"fake-sparse"``.
+    """
+
+    def __init__(self, model_name: str = "fake-sparse") -> None:
+        self.dimension = 8
+        self.mode = EmbedderMode.SPARSE_ONLY
+        self.model_name = model_name
+
+    @property
+    def fingerprint_model_id(self) -> str:
+        """Model identity string for the pipeline fingerprint."""
+        return f"{self.mode.value}:{self.model_name}"
+
+    def embed(self, texts: list[str]) -> list[EmbeddingResult]:
+        """Embed a batch of texts using sparse-only (BM25) vectors.
+
+        Args:
+            texts: List of input texts.
+
+        Returns:
+            List of EmbeddingResult with ``dense=None`` and sparse vectors.
+        """
+        return [
+            EmbeddingResult(dense=None, sparse_indices=i, sparse_values=v)
+            for i, v in (compute_sparse(t) for t in texts)
+        ]
 
 
 class FakeConnector(Connector):

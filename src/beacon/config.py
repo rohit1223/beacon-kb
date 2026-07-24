@@ -114,16 +114,20 @@ class RetrievalSettings(BaseModel):
     """Retrieval pipeline configuration."""
 
     top_k: int = 10
-    """Number of results to return from the vector store."""
+    """Number of primary hits to return from the vector store.
 
-    rerank: bool = False
-    """Whether to apply cross-encoder reranking."""
-
-    parent_expansion: bool = True
-    """Whether to expand retrieved child chunks to their parent context."""
+    This value is the server-wide default; per-request ``top_k`` fields
+    override it. Both the /search and /answer routes use this as the
+    default when no per-request value is provided.
+    """
 
     score_threshold: float = 0.0
-    """Minimum relevance score; results below this are discarded."""
+    """Minimum RRF-scale relevance score; hits below this are excluded.
+
+    Default 0.0 disables the gate. RRF fused scores are bounded by 2/k
+    (approx 0.033 at k=60); set this above that range to require strong
+    sparse signal before returning hits.
+    """
 
 
 class AnswerSettings(BaseModel):
@@ -136,7 +140,23 @@ class AnswerSettings(BaseModel):
     """LLM temperature; 0 for deterministic outputs."""
 
     abstain_when_uncertain: bool = True
-    """If True, the pipeline abstains rather than hallucinating low-confidence answers."""
+    """If True, the pipeline abstains rather than hallucinating low-confidence answers.
+
+    When True the ``score_threshold`` from ``RetrievalSettings`` is used as
+    the pre-abstention gate: any bundle where ALL HIT scores fall below the
+    threshold triggers pre-abstention with zero LLM calls.
+    When False the threshold gate is bypassed (``abstain_threshold=0.0``).
+    The RRF score scale (approx 0.033 max for k=60) differs from the raw
+    TF sparse-only floor score (unbounded); set thresholds accordingly.
+    """
+
+    llm_timeout_s: float = 60.0
+    """Wall-clock timeout in seconds for the single LLM provider call.
+
+    Threads through to ``LiteLlmClient(timeout=...)`` so long-running
+    provider calls are bounded. Richer per-token budget work is tracked
+    in ROADMAP (Epic 06).
+    """
 
 
 class InvestigateSettings(BaseModel):
@@ -246,14 +266,13 @@ class BeaconSettings(BaseSettings):
             },
             "retrieval": {
                 "top_k": self.retrieval.top_k,
-                "rerank": self.retrieval.rerank,
-                "parent_expansion": self.retrieval.parent_expansion,
                 "score_threshold": self.retrieval.score_threshold,
             },
             "answer": {
                 "max_tokens": self.answer.max_tokens,
                 "temperature": self.answer.temperature,
                 "abstain_when_uncertain": self.answer.abstain_when_uncertain,
+                "llm_timeout_s": self.answer.llm_timeout_s,
             },
             "investigate": {
                 "max_iterations": self.investigate.max_iterations,
